@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Dubbing Studio — AI Dubbing Workstation</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.4.0/css/all.min.css">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Cairo:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<!-- ══════════════════ TOP BAR ══════════════════ -->
+<header id="topbar">
+  <div class="topbar-left">
+    <div class="app-logo"><i class="fa-solid fa-microphone-lines"></i> <span>Dubbing<b>Studio</b></span></div>
+    <span id="project-name-label" class="project-name-label"></span>
+  </div>
+  <div class="topbar-center" id="topbar-progress" style="display:none">
+    <div class="mini-progress">
+      <div class="mini-progress-bar"><div id="global-progress-fill"></div></div>
+      <span id="global-progress-text">0%</span>
+    </div>
+  </div>
+  <div class="topbar-right">
+    <button id="btn-preview-all" class="tb-btn" title="Preview Full Project (P) — whole video with all accepted dubbing takes, acapella" style="display:none"><i class="fa-solid fa-play"></i> Preview Full Project</button>
+    <button id="btn-save-project" class="tb-btn" title="Save project bundle (.dubproj.zip) with video, script data and all takes" style="display:none"><i class="fa-solid fa-floppy-disk"></i> Save</button>
+    <button id="btn-open-project" class="tb-btn" title="Open a saved .dubproj.zip project bundle"><i class="fa-solid fa-folder-open"></i> Open</button>
+    <input type="file" id="file-open-project" accept=".zip,.dubproj,application/zip" hidden>
+    <button id="btn-user-mode" class="tb-btn" title="Single / Multi user mode" style="display:none"><i class="fa-solid fa-user"></i> <span id="user-mode-label">Single User</span></button>
+    <button id="btn-focus-mode" class="tb-btn" title="Focus Mode (F)" style="display:none"><i class="fa-solid fa-expand"></i> Focus</button>
+    <button id="btn-export" class="tb-btn tb-btn-accent" style="display:none"><i class="fa-solid fa-file-export"></i> Export</button>
+    <button id="btn-settings" class="tb-btn" title="Settings"><i class="fa-solid fa-gear"></i></button>
+  </div>
+</header>
+
+<!-- ══════════════════ SETUP WIZARD ══════════════════ -->
+<main id="setup-screen">
+  <section class="setup-card">
+    <h1><i class="fa-solid fa-clapperboard"></i> New Dubbing Project</h1>
+    <p class="setup-sub">Upload the video, SRT subtitles and character script. The studio will separate the audio, analyze the dialogue and build a pre-timed dubbing timeline — one segment per line — before you record.</p>
+
+    <div class="setup-field">
+      <label>Project Name</label>
+      <input type="text" id="input-project-name" placeholder="e.g. Apothecary Diaries — EP01" value="">
+    </div>
+
+    <div class="setup-drops">
+      <div class="drop-zone" id="drop-video">
+        <i class="fa-solid fa-film"></i>
+        <b>Video File</b>
+        <span>MP4 / MOV / WebM</span>
+        <em id="video-file-name" class="drop-filename"></em>
+        <input type="file" id="file-video" accept="video/mp4,video/quicktime,video/webm,video/*" hidden>
+      </div>
+      <div class="drop-zone" id="drop-srt">
+        <i class="fa-solid fa-closed-captioning"></i>
+        <b>SRT Subtitles</b>
+        <span>.srt — timing reference</span>
+        <em id="srt-file-name" class="drop-filename"></em>
+        <input type="file" id="file-srt" accept=".srt,text/plain" hidden>
+      </div>
+      <div class="drop-zone" id="drop-script">
+        <i class="fa-solid fa-scroll"></i>
+        <b>Script File</b>
+        <span>.txt — [CHARACTER] + dialogue</span>
+        <em id="script-file-name" class="drop-filename"></em>
+        <input type="file" id="file-script" accept=".txt,text/plain" hidden>
+      </div>
+    </div>
+
+    <div id="setup-error" class="setup-error" style="display:none"></div>
+
+    <button id="btn-create-project" class="btn-primary btn-xl" disabled>
+      <i class="fa-solid fa-wand-magic-sparkles"></i> Create Project &amp; Build Dubbing Timeline
+    </button>
+  </section>
+
+  <!-- Processing pipeline overlay -->
+  <section id="processing-screen" style="display:none">
+    <div class="pipeline-card">
+      <h2><i class="fa-solid fa-gears fa-spin"></i> Building your dubbing workstation…</h2>
+      <ul id="pipeline-steps" class="pipeline-steps">
+        <li data-step="load"><i class="fa-regular fa-circle"></i> Loading video &amp; extracting original audio</li>
+        <li data-step="separate"><i class="fa-regular fa-circle"></i> Voice separation → <code>VOICE_STEM</code> + <code>MUSIC_STEM</code></li>
+        <li data-step="srt"><i class="fa-regular fa-circle"></i> Parsing SRT subtitles (timing reference)</li>
+        <li data-step="script"><i class="fa-regular fa-circle"></i> Analyzing script → identifying characters</li>
+        <li data-step="match"><i class="fa-regular fa-circle"></i> Matching SRT lines ↔ script characters</li>
+        <li data-step="vad"><i class="fa-regular fa-circle"></i> Analyzing VOICE_STEM speech timing vs SRT</li>
+        <li data-step="timeline"><i class="fa-regular fa-circle"></i> Creating pre-timed dubbing segments</li>
+      </ul>
+      <div class="pipeline-note" id="pipeline-note"></div>
+    </div>
+  </section>
+</main>
+
+<!-- ══════════════════ MAIN WORKSPACE ══════════════════ -->
+<main id="workspace" style="display:none">
+
+  <!-- LEFT: characters + dialogue queue -->
+  <aside id="panel-left">
+    <div class="panel-block">
+      <div class="panel-title"><i class="fa-solid fa-masks-theater"></i> CHARACTERS</div>
+      <div id="character-list" class="character-list"></div>
+    </div>
+    <div class="panel-block grow">
+      <div class="panel-title" id="queue-title"><i class="fa-solid fa-list-ol"></i> DIALOGUE QUEUE</div>
+      <div id="dialogue-queue" class="dialogue-queue"></div>
+    </div>
+    <div class="panel-block">
+      <div class="panel-title"><i class="fa-solid fa-chart-simple"></i> PROGRESS</div>
+      <div id="progress-panel" class="progress-panel"></div>
+    </div>
+  </aside>
+
+  <!-- CENTER -->
+  <section id="panel-center">
+    <!-- video preview -->
+    <div id="video-wrap" class="video-wrap ar-original">
+      <video id="video-player" playsinline webkit-playsinline></video>
+      <div class="video-overlay-badge" id="video-seg-badge"></div>
+      <div class="video-controls">
+        <button id="v-prev-frame" title="Previous frame"><i class="fa-solid fa-backward-step"></i></button>
+        <button id="v-play" title="Play/Pause (Space)"><i class="fa-solid fa-play"></i></button>
+        <button id="v-next-frame" title="Next frame"><i class="fa-solid fa-forward-step"></i></button>
+        <span id="v-time" class="v-time mono">00:00.000</span>
+        <input type="range" id="v-seek" min="0" max="1000" value="0" class="v-seek">
+        <i class="fa-solid fa-volume-high v-vol-icon"></i>
+        <input type="range" id="v-volume" min="0" max="100" value="100" class="v-vol">
+        <div class="ar-switch" id="ar-switch">
+          <button data-ar="9-16">9:16</button>
+          <button data-ar="16-9">16:9</button>
+          <button data-ar="1-1">1:1</button>
+          <button data-ar="original" class="active">Orig</button>
+        </div>
+        <button id="v-fullscreen" title="Fullscreen"><i class="fa-solid fa-expand"></i></button>
+      </div>
+    </div>
+
+    <!-- current dialogue -->
+    <div id="dialogue-stage" class="dialogue-stage">
+      <div class="dialogue-meta">
+        <span id="ds-line" class="ds-line mono">—</span>
+        <span id="ds-character" class="ds-character">—</span>
+        <span id="ds-status" class="seg-status-chip">—</span>
+      </div>
+      <div id="ds-text" class="ds-text" dir="auto">اختر سطراً من قائمة الحوار</div>
+      <div class="dialogue-sub">
+        <span class="ds-target">Target: <b id="ds-target" class="mono">—</b></span>
+        <span id="ds-times" class="mono ds-times">—</span>
+        <span class="text-size-ctl">
+          <i class="fa-solid fa-text-height"></i>
+          <input type="range" id="text-size" min="48" max="96" value="60" title="Text size 48–96px">
+          <span id="text-size-val" class="mono">60px</span>
+        </span>
+      </div>
+    </div>
+
+    <!-- reference + record controls row -->
+    <div class="controls-row">
+      <div class="ref-controls">
+        <div class="ref-box" id="ref-voice-box">
+          <div class="ref-box-title"><i class="fa-solid fa-microphone"></i> Original Voice</div>
+          <button id="btn-listen-original" class="btn-listen"><i class="fa-solid fa-play"></i> Listen <span class="kbd">L</span></button>
+        </div>
+        <div class="ref-box">
+          <div class="ref-box-title"><i class="fa-solid fa-music"></i> Background Music</div>
+          <div class="automix-badge"><i class="fa-solid fa-wand-magic-sparkles"></i> Export-only <b>AI MIX</b></div>
+          <div class="automix-note">Preview &amp; recording are acapella (voice only). The separated music stem is auto-leveled into the final export mix.</div>
+        </div>
+      </div>
+
+      <div class="record-center">
+        <div class="rec-timer" id="rec-timer" style="visibility:hidden">
+          <div class="rec-timer-cols">
+            <div><label>TARGET</label><b id="rt-target" class="mono">0.00s</b></div>
+            <div><label>RECORDING</label><b id="rt-actual" class="mono rec-red">0.00s</b></div>
+          </div>
+          <div class="rec-meter"><div id="rec-meter-fill"></div><div id="rec-meter-target-mark"></div></div>
+          <div id="rec-timer-verdict" class="rec-verdict">—</div>
+        </div>
+        <div class="transport">
+          <button id="btn-prev" class="t-btn" title="Previous (←)"><i class="fa-solid fa-backward"></i><span>PREV</span></button>
+          <button id="btn-play-seg" class="t-btn" title="Play segment (Space)"><i class="fa-solid fa-play"></i><span>PLAY</span></button>
+          <button id="btn-record" class="t-btn t-record" title="Record (R) — starts after a countdown"><i class="fa-solid fa-circle"></i><span>RECORD</span></button>
+          <button id="btn-multitake" class="t-btn" title="Multi-Take session (M): record consecutive takes hands-free; AI trims each and picks the best"><i class="fa-solid fa-layer-group"></i><span>MULTI</span></button>
+          <button id="btn-rerecord" class="t-btn" title="Re-record (R)"><i class="fa-solid fa-rotate-left"></i><span>RETAKE</span></button>
+          <button id="btn-accept" class="t-btn t-accept" title="Accept take (Enter)"><i class="fa-solid fa-check"></i><span>ACCEPT</span></button>
+          <button id="btn-next" class="t-btn" title="Next (→)"><i class="fa-solid fa-forward"></i><span>NEXT</span></button>
+        </div>
+        <div class="mic-level-wrap"><div class="mic-level"><div id="mic-level-fill"></div></div><span class="mic-label"><i class="fa-solid fa-microphone"></i> MIC</span></div>
+      </div>
+    </div>
+
+    <!-- DUBBING TIMELINE — the only visible timeline -->
+    <div id="timeline-panel">
+      <div class="timeline-header">
+        <span class="panel-title"><i class="fa-solid fa-timeline"></i> DUBBING TIMELINE</span>
+        <span class="timeline-legend">
+          <i class="lg lg-empty"></i>Empty <i class="lg lg-current"></i>Current <i class="lg lg-accepted"></i>Accepted <i class="lg lg-review"></i>Review/Retake
+        </span>
+        <span class="timeline-zoom">
+          <i class="fa-solid fa-magnifying-glass"></i>
+          <input type="range" id="timeline-zoom" min="20" max="200" value="60">
+        </span>
+      </div>
+      <div id="timeline-scroll" class="timeline-scroll">
+        <div id="timeline-ruler" class="timeline-ruler"></div>
+        <div id="timeline-track" class="timeline-track">
+          <div id="timeline-playhead" class="timeline-playhead"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- RIGHT: AI assistant + takes -->
+  <aside id="panel-right">
+    <div class="panel-block">
+      <div class="panel-title"><i class="fa-solid fa-robot"></i> AI TIMING ASSISTANT</div>
+      <div id="ai-panel" class="ai-panel">
+        <div class="ai-idle">Record a take and the assistant will compare it with the target duration.</div>
+      </div>
+    </div>
+    <div class="panel-block grow">
+      <div class="panel-title"><i class="fa-solid fa-layer-group"></i> TAKES <span id="takes-line-label" class="mono"></span></div>
+      <div id="takes-list" class="takes-list"><div class="takes-empty">No takes yet for this line.</div></div>
+    </div>
+    <div class="panel-block">
+      <div class="panel-title"><i class="fa-solid fa-wave-square"></i> ORIGINAL SPEECH ANALYSIS</div>
+      <div id="speech-analysis" class="speech-analysis">—</div>
+    </div>
+  </aside>
+</main>
+
+<!-- ══════════════════ FOCUS MODE ══════════════════ -->
+<div id="focus-overlay" style="display:none">
+  <button id="focus-exit" class="focus-exit"><i class="fa-solid fa-compress"></i> Exit Focus (F)</button>
+  <div class="focus-inner">
+    <div id="focus-video-slot" class="focus-video-slot"></div>
+    <div class="focus-char" id="focus-character">—</div>
+    <div class="focus-text" id="focus-text" dir="auto">—</div>
+    <div class="focus-target mono" id="focus-target">Target: —</div>
+    <div class="focus-controls">
+      <button id="f-listen" class="btn-listen"><i class="fa-solid fa-play"></i> Original Voice</button>
+      <span class="focus-music"><i class="fa-solid fa-microphone-lines"></i> Acapella preview · music in export only</span>
+    </div>
+    <div class="focus-transport">
+      <button id="f-prev" class="t-btn"><i class="fa-solid fa-backward"></i><span>PREV</span></button>
+      <button id="f-record" class="t-btn t-record"><i class="fa-solid fa-circle"></i><span>RECORD</span></button>
+      <button id="f-accept" class="t-btn t-accept"><i class="fa-solid fa-check"></i><span>ACCEPT</span></button>
+      <button id="f-next" class="t-btn"><i class="fa-solid fa-forward"></i><span>NEXT</span></button>
+    </div>
+    <div class="focus-rec-timer" id="focus-rec-timer" style="visibility:hidden">
+      <span>TARGET <b id="f-rt-target" class="mono">—</b></span>
+      <span>REC <b id="f-rt-actual" class="mono rec-red">—</b></span>
+      <span id="f-rt-verdict">—</span>
+    </div>
+    <div class="focus-segment mono" id="focus-segment">—</div>
+  </div>
+</div>
+
+<!-- ══════════════════ SETTINGS MODAL ══════════════════ -->
+<div id="modal-settings" class="modal-backdrop" style="display:none">
+  <div class="modal">
+    <div class="modal-head"><h2><i class="fa-solid fa-gear"></i> Settings</h2><button class="modal-close" data-close="modal-settings"><i class="fa-solid fa-xmark"></i></button></div>
+    <div class="modal-body">
+      <h3>Gemini API</h3>
+      <label class="m-label">API Key</label>
+      <div class="key-row">
+        <input type="password" id="setting-api-key" placeholder="Paste your Gemini API key">
+        <button id="toggle-key-visibility" class="btn-ghost" title="Show/Hide"><i class="fa-regular fa-eye"></i></button>
+      </div>
+      <p class="m-hint"><i class="fa-solid fa-triangle-exclamation"></i> The key is stored only in this browser (localStorage). This is fine for a personal prototype, but a browser can never truly keep a secret — for production, route Gemini calls through a server-side proxy.</p>
+      <label class="m-label">Model</label>
+      <select id="setting-model"></select>
+      <div class="custom-model-row">
+        <input type="text" id="custom-model-input" placeholder="e.g. gemini-4-flash">
+        <button id="btn-add-model" class="btn-ghost"><i class="fa-solid fa-plus"></i> Add Custom Model</button>
+      </div>
+      <h3>AI Usage</h3>
+      <label class="duck-toggle"><input type="checkbox" id="setting-ai-matching" checked> Use Gemini for ambiguous script/SRT matching</label>
+      <h3>AI Audio Enhancement</h3>
+      <label class="duck-toggle"><input type="checkbox" id="setting-auto-enhance"> Auto-enhance every new take automatically (noise removal, EQ, compression, de-esser, loudness)</label>
+      <label class="duck-toggle"><input type="checkbox" id="setting-enhance-gemini" checked> Let Gemini review the measurements and fine-tune the enhancement chain (when an API key is set)</label>
+      <p class="m-hint">Enhancement is fully automatic — the AI analyzes each take and decides what processing it needs. You can also enhance any single take with the ✨ AI Enhance button in the Takes panel; the original recording is always kept for A/B comparison.</p>
+      <div class="modal-actions">
+        <button id="btn-test-api" class="btn-ghost"><i class="fa-solid fa-plug-circle-check"></i> Test Connection</button>
+        <button id="btn-save-settings" class="btn-primary"><i class="fa-solid fa-floppy-disk"></i> Save Settings</button>
+      </div>
+      <div id="settings-status" class="settings-status"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════ EXPORT MODAL ══════════════════ -->
+<div id="modal-export" class="modal-backdrop" style="display:none">
+  <div class="modal">
+    <div class="modal-head"><h2><i class="fa-solid fa-file-export"></i> Export Project</h2><button class="modal-close" data-close="modal-export"><i class="fa-solid fa-xmark"></i></button></div>
+    <div class="modal-body">
+      <div class="export-options" id="export-mix-options">
+        <label class="export-opt"><input type="radio" name="export-mix" value="full" checked><div><b>Full Dub</b><span>Dubbing + Music (with video for MP4)</span></div></label>
+        <label class="export-opt"><input type="radio" name="export-mix" value="dub"><div><b>Dubbing Only</b><span>Your accepted recordings, placed at exact segment times</span></div></label>
+        <label class="export-opt"><input type="radio" name="export-mix" value="music"><div><b>Music Only</b><span>Separated background music stem</span></div></label>
+      </div>
+      <label class="m-label">Format</label>
+      <div class="export-format" id="export-format">
+        <button data-fmt="mp3" class="active">MP3 Audio</button>
+        <button data-fmt="mp4">Video (H.264 MP4 / WebM)*</button>
+      </div>
+      <p class="m-hint" id="export-fmt-hint">MP3 · 44.1kHz stereo · mixed from accepted takes at exact segment positions.</p>
+      <div class="modal-actions">
+        <button id="btn-do-export" class="btn-primary btn-xl"><i class="fa-solid fa-download"></i> EXPORT</button>
+      </div>
+      <div id="export-progress" class="export-progress" style="display:none">
+        <div class="mini-progress-bar"><div id="export-progress-fill"></div></div>
+        <span id="export-progress-text">Preparing…</span>
+      </div>
+      <div id="export-status" class="settings-status"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════ USER MODE MODAL ══════════════════ -->
+<div id="modal-users" class="modal-backdrop" style="display:none">
+  <div class="modal">
+    <div class="modal-head"><h2><i class="fa-solid fa-users"></i> User Mode</h2><button class="modal-close" data-close="modal-users"><i class="fa-solid fa-xmark"></i></button></div>
+    <div class="modal-body">
+      <div class="export-options">
+        <label class="export-opt"><input type="radio" name="user-mode" value="single" checked><div><b>Single User</b><span>One actor records all characters</span></div></label>
+        <label class="export-opt"><input type="radio" name="user-mode" value="multi"><div><b>Multi User</b><span>Assign characters to different users</span></div></label>
+      </div>
+      <div id="multi-user-config" style="display:none">
+        <h3>Character Assignments</h3>
+        <div id="user-assignments"></div>
+        <label class="m-label">Active user (this workstation)</label>
+        <select id="active-user-select"></select>
+        <p class="m-hint">The active user sees only their assigned characters. The owner view shows overall progress.</p>
+        <label class="duck-toggle"><input type="checkbox" id="owner-view"> Owner view (see all characters &amp; progress)</label>
+      </div>
+      <div class="modal-actions"><button id="btn-save-users" class="btn-primary"><i class="fa-solid fa-floppy-disk"></i> Apply</button></div>
+    </div>
+  </div>
+</div>
+
+<!-- pre-record countdown overlay -->
+<div id="countdown-overlay" style="display:none">
+  <div class="countdown-box">
+    <div id="countdown-number">3</div>
+    <div class="countdown-label" id="countdown-label">GET READY…</div>
+    <button id="countdown-cancel" class="btn-ghost"><i class="fa-solid fa-xmark"></i> Cancel (Esc)</button>
+  </div>
+</div>
+
+<!-- toast -->
+<div id="toast-container"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/lamejs@1.2.1/lame.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+<script src="js/parsers.js"></script>
+<script src="js/audio-engine.js"></script>
+<script src="js/dsp-chain.js"></script>
+<script src="js/recorder.js"></script>
+<script src="js/gemini.js"></script>
+<script src="js/enhancer.js"></script>
+<script src="js/timeline.js"></script>
+<script src="js/exporter.js"></script>
+<script src="js/project-store.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
