@@ -407,6 +407,18 @@ const Recorder = (() => {
     return ac.createBuffer(1, Math.max(1, Math.ceil(duration * sr)), sr);
   }
 
+  // Open recording is intentionally not tied to the video duration. Grow the
+  // backing buffer in generous blocks so a performer can keep speaking after
+  // picture lock without allocations on every timer tick.
+  function ensureTrackDuration(track, minimumDuration, blockSeconds = 30) {
+    if (!track) return createOpenTrack(Math.max(blockSeconds, minimumDuration));
+    if (track.duration >= minimumDuration) return track;
+    const target = Math.ceil(Math.max(minimumDuration, track.duration + 0.01) / blockSeconds) * blockSeconds;
+    const out = createOpenTrack(target, track.sampleRate);
+    for (let c = 0; c < track.numberOfChannels; c++) out.copyToChannel(track.getChannelData(c), c);
+    return out;
+  }
+
   function overwriteTrack(track, source, atSeconds, sourceStart = 0, duration = null) {
     if (!track || !source) throw new Error('Audio track data is missing.');
     const at = Math.max(0, Math.min(track.duration, atSeconds || 0));
@@ -448,15 +460,63 @@ const Recorder = (() => {
     const from = Math.max(0, Math.min(track.duration, Math.min(fromSeconds, toSeconds)));
     const to = Math.max(from, Math.min(track.duration, Math.max(fromSeconds, toSeconds)));
     const duration = to - from;
-    const at = Math.max(0, Math.min(track.duration - duration, atSeconds));
+    const at = Math.max(0, atSeconds);
     if (duration < 0.01) return cloneBuffer(track);
-    const out = cloneBuffer(track);
+    const out = ensureTrackDuration(track, at + duration);
     const sr = track.sampleRate;
     const src = track.getChannelData(0).slice(Math.floor(from * sr), Math.ceil(to * sr));
     const dst = out.getChannelData(0);
     dst.fill(0, Math.floor(from * sr), Math.ceil(to * sr));
     dst.set(src.subarray(0, Math.max(0, dst.length - Math.floor(at * sr))), Math.floor(at * sr));
     return out;
+  }
+
+  function processTrackRange(track, fromSeconds, toSeconds, processor) {
+    if (!track) throw new Error('No open recording exists yet.');
+    const from = Math.max(0, Math.min(track.duration, Math.min(fromSeconds, toSeconds)));
+    const to = Math.max(from, Math.min(track.duration, Math.max(fromSeconds, toSeconds)));
+    if (to - from < 0.01) throw new Error('Select an audio range first.');
+    const out = cloneBuffer(track), sr = out.sampleRate;
+    const start = Math.floor(from * sr), end = Math.min(out.length, Math.ceil(to * sr));
+    for (let c = 0; c < out.numberOfChannels; c++) processor(out.getChannelData(c), start, end, sr);
+    return out;
+  }
+
+  function gainTrackRange(track, from, to, db) {
+    const gain = Math.pow(10, Math.max(-60, Math.min(24, db)) / 20);
+    return processTrackRange(track, from, to, (data, start, end) => {
+      for (let i = start; i < end; i++) data[i] = Math.max(-1, Math.min(1, data[i] * gain));
+    });
+  }
+
+  function normalizeTrackRange(track, from, to, peakDb = -3) {
+    let peak = 0;
+    const start = Math.floor(Math.min(from, to) * track.sampleRate);
+    const end = Math.min(track.length, Math.ceil(Math.max(from, to) * track.sampleRate));
+    for (let c = 0; c < track.numberOfChannels; c++) {
+      const data = track.getChannelData(c);
+      for (let i = start; i < end; i++) peak = Math.max(peak, Math.abs(data[i]));
+    }
+    if (peak < 1e-6) throw new Error('The selected range is silent.');
+    return gainTrackRange(track, from, to, 20 * Math.log10(Math.pow(10, peakDb / 20) / peak));
+  }
+
+  function fadeTrackRange(track, from, to, type) {
+    return processTrackRange(track, from, to, (data, start, end) => {
+      const length = Math.max(1, end - start - 1);
+      for (let i = start; i < end; i++) {
+        const p = (i - start) / length;
+        data[i] *= type === 'out' ? Math.cos(p * Math.PI / 2) : Math.sin(p * Math.PI / 2);
+      }
+    });
+  }
+
+  function reverseTrackRange(track, from, to) {
+    return processTrackRange(track, from, to, (data, start, end) => {
+      for (let a = start, b = end - 1; a < b; a++, b--) {
+        const sample = data[a]; data[a] = data[b]; data[b] = sample;
+      }
+    });
   }
 
   // Energy-based speech segmentation used by "Save recording". Short gaps are
@@ -501,5 +561,5 @@ const Recorder = (() => {
     if (mediaStream) { mediaStream.getTracks().forEach(t => t.stop()); mediaStream = null; }
   }
 
-  return { ensureMic, start, stop, isRecording, playTake, playTakeRaw, stopTake, canFit, fitToTarget, releaseMic, analyzeTakeBuffer, scoreTake, selectBestTake, createOpenTrack, overwriteTrack, silenceTrackRange, moveTrackRange, detectSpeechRegions, cloneBuffer, SAFETY_TAIL_MS };
+  return { ensureMic, start, stop, isRecording, playTake, playTakeRaw, stopTake, canFit, fitToTarget, releaseMic, analyzeTakeBuffer, scoreTake, selectBestTake, createOpenTrack, ensureTrackDuration, overwriteTrack, silenceTrackRange, moveTrackRange, gainTrackRange, normalizeTrackRange, fadeTrackRange, reverseTrackRange, detectSpeechRegions, cloneBuffer, SAFETY_TAIL_MS };
 })();
