@@ -38,6 +38,7 @@ const ProjectStore = (() => {
       id: s.id, lineNumber: s.lineNumber, character: s.character,
       sourceLineNumbers: s.sourceLineNumbers || [s.lineNumber],
       sourceSegmentIds: s.sourceSegmentIds || [s.id],
+      mergedSources: s.mergedSources || null,
       text: s.text, activeText: s.activeText,
       startTime: s.startTime, endTime: s.endTime, targetDuration: s.targetDuration,
       originalSpeechStart: s.originalSpeechStart, originalSpeechEnd: s.originalSpeechEnd,
@@ -74,8 +75,10 @@ const ProjectStore = (() => {
       openRecording: p.openRecording && p.openRecording.hasAudio && p.openRecording.buffer ? {
         hasAudio: true,
         file: 'audio/open-recording.wav',
-        edits: p.openRecording.edits || []
-      } : { hasAudio: false, edits: p.openRecording?.edits || [] },
+        edits: p.openRecording.edits || [],
+        clips: p.openRecording.clips || [],
+        saved: !!p.openRecording.saved
+      } : { hasAudio: false, edits: p.openRecording?.edits || [], clips: p.openRecording?.clips || [], saved: false },
       segments
     };
     zip.file('project.json', JSON.stringify(manifest, null, 1));

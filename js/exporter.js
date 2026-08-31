@@ -59,7 +59,9 @@ const Exporter = (() => {
         src.start(0, 0, Math.min(duration, openRecordingBuffer.duration));
         placed = 1;
       } else {
-        for (const seg of segments) {
+        const ordered = [...segments].sort((a, b) => a.startTime - b.startTime);
+        for (let i = 0; i < ordered.length; i++) {
+          const seg = ordered[i];
           if (!seg.acceptedTakeId) continue;
           const take = seg.takes.find(t => t.id === seg.acceptedTakeId);
           if (!take) continue;
@@ -70,8 +72,12 @@ const Exporter = (() => {
           const src = off.createBufferSource();
           src.buffer = eff.buffer;
           src.connect(off.destination);
-          // exact segment placement — the segment's start time is authoritative
-          src.start(seg.startTime, eff.start, Math.min(eff.duration, seg.targetDuration + 0.4));
+          // Exact placement with a hard non-overlap boundary. A long take is
+          // clipped before the next dialogue starts instead of being mixed on
+          // top of it and distorting both performances.
+          const next = ordered[i + 1];
+          const untilNext = next ? Math.max(0.01, next.startTime - seg.startTime) : duration - seg.startTime;
+          src.start(seg.startTime, eff.start, Math.min(eff.duration, seg.targetDuration, untilNext));
           placed++;
         }
       }

@@ -289,6 +289,8 @@ const Parsers = (() => {
       lineNumber: sourceLineNumbers[0],
       sourceLineNumbers,
       sourceSegmentIds: picked.flatMap(s => s.sourceSegmentIds || [s.id]),
+      // Keep complete source snapshots so a merge is always reversible.
+      mergedSources: picked.flatMap(s => s.mergedSources || [cloneSegmentForMerge(s)]),
       text: picked.map(s => s.text).join('\n'),
       activeText: picked.map(s => s.activeText || s.text).join('\n'),
       startTime: first.startTime,
@@ -310,5 +312,32 @@ const Parsers = (() => {
     return { segments: next, merged, removed: picked };
   }
 
-  return { parseSRT, parseScript, matchCuesToScript, buildSegments, mergeSegments, secondsToClock, srtTimeToSeconds, similarity, normalizeCharName };
+  function cloneSegmentForMerge(segment) {
+    return {
+      ...segment,
+      sourceLineNumbers: [...(segment.sourceLineNumbers || [segment.lineNumber])],
+      sourceSegmentIds: [...(segment.sourceSegmentIds || [segment.id])],
+      takes: [...(segment.takes || [])],
+      aiSuggestions: [...(segment.aiSuggestions || [])],
+      mergedSources: undefined
+    };
+  }
+
+  function unmergeSegment(allSegments, id) {
+    const index = allSegments.findIndex(s => s.id === id);
+    if (index < 0) throw new Error('Select a merged dialogue segment first.');
+    const merged = allSegments[index];
+    if (!merged.mergedSources || merged.mergedSources.length < 2) {
+      throw new Error('This segment is not a reversible merge.');
+    }
+    if ((merged.takes && merged.takes.length) || merged.acceptedTakeId) {
+      throw new Error('Delete takes recorded on the merged segment before separating it, so no audio is lost.');
+    }
+    const restored = merged.mergedSources.map(cloneSegmentForMerge).sort((a, b) => a.startTime - b.startTime);
+    const next = [...allSegments];
+    next.splice(index, 1, ...restored);
+    return { segments: next, restored, removed: merged };
+  }
+
+  return { parseSRT, parseScript, matchCuesToScript, buildSegments, mergeSegments, unmergeSegment, secondsToClock, srtTimeToSeconds, similarity, normalizeCharName };
 })();
