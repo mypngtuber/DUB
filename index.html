@@ -293,25 +293,45 @@
         <button id="open-stop" class="btn-ghost" disabled><i class="fa-solid fa-stop"></i> Stop</button>
         <button id="open-save-track" class="btn-primary" title="Save the master track and automatically detect/slice speech clips"><i class="fa-solid fa-floppy-disk"></i> Save recording</button>
       </div>
+      <div class="open-timeline-toolbar">
+        <span class="open-unlimited-badge"><i class="fa-solid fa-infinity"></i> Unlimited voice timeline</span>
+        <span id="open-track-duration" class="mono">Timeline 00:30.000</span>
+        <label><i class="fa-solid fa-magnifying-glass"></i> Zoom <input id="open-zoom" type="range" min="25" max="400" value="100"></label>
+        <button id="open-zoom-fit" class="btn-ghost" title="Show the complete recorded timeline"><i class="fa-solid fa-arrows-left-right-to-line"></i> Fit</button>
+      </div>
       <input id="open-seek" class="open-seek" type="range" min="0" max="1000" value="0">
-      <div class="open-wave-editor">
-        <canvas id="open-wave-canvas" height="150" aria-label="Open recording waveform editor"></canvas>
-        <div id="open-clip-layer" class="open-clip-layer" aria-label="Editable audio clips"></div>
-        <div class="open-wave-help">Premiere-style timeline: drag a clip to move it · drag its edges to trim · click to select · red line is the split point</div>
+      <div id="open-timeline-scroll" class="open-timeline-scroll">
+        <div id="open-timeline-content" class="open-timeline-content">
+          <div id="open-time-ruler" class="open-time-ruler"></div>
+          <div class="open-wave-editor">
+            <canvas id="open-wave-canvas" height="150" aria-label="Unlimited open recording waveform editor"></canvas>
+            <div id="open-clip-layer" class="open-clip-layer" aria-label="Editable audio clips"></div>
+          </div>
+        </div>
+      </div>
+      <div class="open-wave-help">Audition-style editing: drag clips to move · drag edges to trim · drag waveform to select · recording continues after the video ends</div>
+      <div class="open-editor-toolbar" role="toolbar" aria-label="Audio processing tools">
+        <strong><i class="fa-solid fa-sliders"></i> Audio tools</strong>
+        <label>Gain <input id="open-gain-db" type="number" min="-60" max="24" step="0.5" value="0"> dB</label>
+        <button id="open-apply-gain" class="btn-ghost"><i class="fa-solid fa-volume-high"></i> Apply gain</button>
+        <button id="open-normalize" class="btn-ghost"><i class="fa-solid fa-wave-square"></i> Normalize −3 dB</button>
+        <button id="open-fade-in" class="btn-ghost"><i class="fa-solid fa-arrow-trend-up"></i> Fade in</button>
+        <button id="open-fade-out" class="btn-ghost"><i class="fa-solid fa-arrow-trend-down"></i> Fade out</button>
+        <button id="open-reverse" class="btn-ghost"><i class="fa-solid fa-backward"></i> Reverse</button>
       </div>
       <div class="open-edit-grid">
         <label>Selection start <input id="open-sel-start" type="number" min="0" step="0.01" value="0"></label>
         <button id="open-set-in" class="btn-ghost"><i class="fa-solid fa-i-cursor"></i> Set IN at cursor</button>
         <label>Selection end <input id="open-sel-end" type="number" min="0" step="0.01" value="0"></label>
         <button id="open-set-out" class="btn-ghost"><i class="fa-solid fa-i-cursor"></i> Set OUT at cursor</button>
-        <button id="open-delete-selection" class="btn-ghost open-danger"><i class="fa-solid fa-trash"></i> Delete selected audio</button>
+        <button id="open-delete-selection" class="btn-ghost open-danger"><i class="fa-solid fa-trash"></i> Silence selection</button>
         <button id="open-record-selection" class="btn-ghost"><i class="fa-solid fa-microphone-lines"></i> Re-record selection</button>
         <button id="open-split" class="btn-ghost"><i class="fa-solid fa-scissors"></i> Split at cursor</button>
         <button id="open-trim-selection" class="btn-ghost"><i class="fa-solid fa-crop-simple"></i> Trim clip to selection</button>
         <button id="open-undo" class="btn-ghost" disabled><i class="fa-solid fa-rotate-left"></i> Undo (Ctrl+Z)</button>
         <button id="open-clear" class="btn-ghost open-danger"><i class="fa-solid fa-eraser"></i> Clear track</button>
       </div>
-      <div id="open-rec-status" class="settings-status">Recordings stay as separate editable clips. Save recording analyzes speech and aligns the clips without overlap.</div>
+      <div id="open-rec-status" class="settings-status">The voice timeline is independent from the video. Keep recording as long as needed; AI alignment will preserve every spoken word.</div>
     </div>
   </div>
 </div>

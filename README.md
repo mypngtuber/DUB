@@ -55,12 +55,14 @@ Upload Video → Separate Audio (VOICE_STEM + MUSIC_STEM) → Analyze Original D
 - **Fit Audio to Target**: optional gentle time-stretch (≤12% — beyond that it recommends retake/AI rewrite)
 - **✓ ACCEPT TAKE** is always explicit — accepted audio placed at the segment's exact start/end (authoritative)
 
-### Open Recording — one editable track for the full clip
-- A single project-length track lets the actor perform the entire clip continuously while the current SRT text, character, next line and cue progress remain synchronized with the video
-- Start or continue recording from any playhead position; recording overwrites only the newly captured range and preserves the rest of the full take
-- Drag directly on the waveform to select a range, set precise IN/OUT points, delete a range without shifting video sync, re-record only the selection, clear the track, or undo recent edits
-- Preview the full recording with the muted video and choose **Open recording track** as the voice source during audio/video export
-- Open-track audio and edit history metadata are included in `.dubproj.zip` project bundles
+### Open Recording — unlimited professional voice timeline
+- The voice timeline is independent from picture lock and expands automatically in 30-second blocks, so the actor can keep performing after the video ends and stop naturally without losing a word
+- The video and SRT cues stay synchronized while picture is available; after picture ends the voice playhead and microphone keep running until Stop is pressed
+- Start or continue recording from any playhead position; recording overwrites only the newly captured range and preserves the rest of the take
+- Audition-style waveform tools: adjustable timeline zoom, clip move/edge trim, range selection, precise IN/OUT, silence/delete, re-record, split, trim, gain (−60 to +24 dB), peak normalization to −3 dB, fades, reverse and multi-level undo
+- **Save recording** detects every speech region and aligns clips to dialogue cues without overlaps while dynamically growing the master track instead of clipping long performances
+- MP3 export preserves open-track speech beyond the video duration; video export remains locked to the source picture length
+- Open-track audio, extended duration and edit history metadata are included in `.dubproj.zip` project bundles
 
 ### ✨ AI-Powered Professional Audio Enhancement (fully automatic)
 - **AI Auto Enhance** button on every take (+ optional auto-enhance of every new take, toggle in Settings)

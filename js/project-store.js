@@ -75,6 +75,7 @@ const ProjectStore = (() => {
       openRecording: p.openRecording && p.openRecording.hasAudio && p.openRecording.buffer ? {
         hasAudio: true,
         file: 'audio/open-recording.wav',
+        duration: p.openRecording.duration || p.openRecording.buffer.duration,
         edits: p.openRecording.edits || [],
         clips: p.openRecording.clips || [],
         saved: !!p.openRecording.saved

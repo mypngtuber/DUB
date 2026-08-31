@@ -1320,11 +1320,25 @@ const OpenRec = {
   recording: false, stopping: false, cursor: 0, recordStart: 0,
   selection: [0, 0], replaceEnd: null, playSource: null, history: [], dragStart: null,
   selectedClipId: null, clipDrag: null, listeningMode: false, voiceStarted: false,
-  voiceFrames: 0, silenceMs: 0
+  voiceFrames: 0, silenceMs: 0, zoom: 1, recordedElapsed: 0
 };
 
 function createOpenRecordingState(duration) {
-  return { buffer: null, hasAudio: false, duration, edits: [], clips: [], saved: false };
+  return { buffer: null, hasAudio: false, duration: Math.max(30, duration), edits: [], clips: [], saved: false };
+}
+
+function openTimelineDuration() {
+  const state = State.project?.openRecording;
+  const clipEnd = state?.clips?.reduce((max, clip) => Math.max(max, clip.end), 0) || 0;
+  return Math.max(30, State.project?.duration || 0, state?.duration || 0, clipEnd, OpenRec.cursor || 0);
+}
+
+function growOpenTimeline(minimumDuration) {
+  const state = ensureOpenBuffer();
+  if (minimumDuration <= state.duration) return state;
+  state.duration = Math.ceil(minimumDuration / 30) * 30;
+  state.buffer = Recorder.ensureTrackDuration(state.buffer, state.duration);
+  return state;
 }
 
 function resetOpenRecordingSession() {
@@ -1332,6 +1346,7 @@ function resetOpenRecordingSession() {
   OpenRec.recording = false; OpenRec.stopping = false; OpenRec.cursor = 0; OpenRec.recordStart = 0;
   OpenRec.selection = [0, 0]; OpenRec.replaceEnd = null; OpenRec.history = [];
   OpenRec.selectedClipId = null; OpenRec.clipDrag = null; OpenRec.voiceStarted = false; OpenRec.silenceMs = 0;
+  OpenRec.zoom = 1; OpenRec.recordedElapsed = 0;
 }
 
 function openRecordingEditor() {
@@ -1339,8 +1354,9 @@ function openRecordingEditor() {
   const video = $('open-rec-video');
   video.src = State.project.videoURL;
   video.currentTime = Math.min(OpenRec.cursor, State.project.duration);
-  $('open-sel-start').max = State.project.duration;
-  $('open-sel-end').max = State.project.duration;
+  const timelineDuration = openTimelineDuration();
+  $('open-sel-start').max = timelineDuration;
+  $('open-sel-end').max = timelineDuration;
   openModal('modal-open-recording');
   updateOpenRecordingUI();
   drawOpenWaveform();
@@ -1354,8 +1370,10 @@ function initOpenRecording() {
     updateOpenRecordingUI();
     if (OpenRec.recording && OpenRec.replaceEnd != null && video.currentTime >= OpenRec.replaceEnd) stopOpenRecording();
   });
-  video.addEventListener('ended', () => { if (OpenRec.recording) stopOpenRecording(); else stopOpenPlayback(); });
-  $('open-seek').addEventListener('input', e => setOpenCursor((+e.target.value / 1000) * State.project.duration));
+  // Reaching picture lock never stops microphone capture. The playhead keeps
+  // moving on the independent voice timeline until the actor presses Stop.
+  video.addEventListener('ended', () => { if (!OpenRec.recording) stopOpenPlayback(); });
+  $('open-seek').addEventListener('input', e => setOpenCursor((+e.target.value / 1000) * openTimelineDuration()));
   $('open-play-video').addEventListener('click', () => {
     if (OpenRec.playSource) { stopOpenPlayback(); return; }
     video.muted = true;
@@ -1378,27 +1396,36 @@ function initOpenRecording() {
   $('open-trim-selection').addEventListener('click', trimOpenClipToSelection);
   $('open-clear').addEventListener('click', clearOpenTrack);
   $('open-undo').addEventListener('click', undoOpenEdit);
+  $('open-zoom').addEventListener('input', e => { OpenRec.zoom = +e.target.value / 100; drawOpenWaveform(); });
+  $('open-zoom-fit').addEventListener('click', () => { OpenRec.zoom = 1; $('open-zoom').value = 100; drawOpenWaveform(); });
+  $('open-apply-gain').addEventListener('click', () => applyOpenAudioProcess('gain'));
+  $('open-normalize').addEventListener('click', () => applyOpenAudioProcess('normalize'));
+  $('open-fade-in').addEventListener('click', () => applyOpenAudioProcess('fade-in'));
+  $('open-fade-out').addEventListener('click', () => applyOpenAudioProcess('fade-out'));
+  $('open-reverse').addEventListener('click', () => applyOpenAudioProcess('reverse'));
   bindOpenWaveSelection();
 }
 
 function setOpenCursor(seconds) {
-  const duration = State.project.duration;
+  const duration = openTimelineDuration();
   OpenRec.cursor = Math.max(0, Math.min(duration, seconds || 0));
   const video = $('open-rec-video');
   video.pause();
-  video.currentTime = OpenRec.cursor;
+  video.currentTime = Math.min(OpenRec.cursor, State.project.duration);
   stopOpenPlayback();
   updateOpenRecordingUI();
 }
 
 function updateOpenRecordingUI() {
   if (!State.project) return;
-  const duration = State.project.duration;
+  const duration = openTimelineDuration();
   const video = $('open-rec-video');
-  const time = Number.isFinite(video.currentTime) ? video.currentTime : OpenRec.cursor;
-  $('open-rec-time').textContent = `${Parsers.secondsToClock(time)} / ${Parsers.secondsToClock(duration)}`;
+  const time = OpenRec.recording ? OpenRec.cursor : OpenRec.cursor;
+  $('open-rec-time').textContent = `${Parsers.secondsToClock(time)} / voice ${Parsers.secondsToClock(duration)} · video ${Parsers.secondsToClock(State.project.duration)}`;
+  $('open-track-duration').textContent = `Timeline ${Parsers.secondsToClock(duration)}`;
   $('open-seek').value = duration ? Math.round(time / duration * 1000) : 0;
-  updateOpenScript(time);
+  $('open-sel-start').max = duration; $('open-sel-end').max = duration;
+  updateOpenScript(Math.min(time, State.project.duration));
   updateOpenTransport();
   drawOpenWaveform();
 }
@@ -1443,7 +1470,8 @@ function updateOpenTransport() {
 
 function ensureOpenBuffer() {
   const state = State.project.openRecording || (State.project.openRecording = createOpenRecordingState(State.project.duration));
-  if (!state.buffer) state.buffer = Recorder.createOpenTrack(State.project.duration);
+  if (!state.duration) state.duration = Math.max(30, State.project.duration);
+  if (!state.buffer) state.buffer = Recorder.createOpenTrack(state.duration);
   if (!Array.isArray(state.clips)) state.clips = [];
   return state;
 }
@@ -1462,13 +1490,13 @@ async function startOpenRecording(selectionOnly, armedListening = false) {
     await Recorder.ensureMic();
     stopOpenPlayback();
     const video = $('open-rec-video');
-    video.currentTime = OpenRec.cursor;
+    video.currentTime = Math.min(OpenRec.cursor, State.project.duration);
     OpenRec.recordStart = findNonOverlappingStart(OpenRec.cursor, 0.05);
     OpenRec.voiceStarted = !armedListening;
     OpenRec.voiceFrames = 0;
     OpenRec.silenceMs = 0;
     video.muted = true;
-    const pseudoSegment = { id: 'open-recording', targetDuration: Math.max(0.1, (OpenRec.replaceEnd || State.project.duration) - OpenRec.cursor) };
+    const pseudoSegment = { id: 'open-recording', targetDuration: Math.max(0.1, (OpenRec.replaceEnd || openTimelineDuration()) - OpenRec.cursor) };
     OpenRec.recording = true;
     OpenRec.stopping = false;
     State.recording = true;
@@ -1479,8 +1507,16 @@ async function startOpenRecording(selectionOnly, armedListening = false) {
       : `● Recording from ${Parsers.secondsToClock(OpenRec.recordStart)} — press Stop at any time.`;
     await Recorder.start(pseudoSegment, {
       onTick: elapsed => {
-        const end = OpenRec.replaceEnd || State.project.duration;
-        if (OpenRec.voiceStarted && OpenRec.recordStart + elapsed >= end && !OpenRec.stopping) stopOpenRecording();
+        if (!OpenRec.voiceStarted) return;
+        OpenRec.recordedElapsed = elapsed;
+        OpenRec.cursor = OpenRec.recordStart + elapsed;
+        if (OpenRec.cursor > openTimelineDuration() - 5) growOpenTimeline(OpenRec.cursor + 30);
+        if (OpenRec.cursor <= State.project.duration && Math.abs(video.currentTime - OpenRec.cursor) > 0.35) video.currentTime = OpenRec.cursor;
+        const timelineDuration = openTimelineDuration();
+        $('open-rec-time').textContent = `${Parsers.secondsToClock(OpenRec.cursor)} / voice ${Parsers.secondsToClock(timelineDuration)} · video ${Parsers.secondsToClock(State.project.duration)}`;
+        $('open-track-duration').textContent = `Timeline ${Parsers.secondsToClock(timelineDuration)}`;
+        $('open-seek').value = Math.round(OpenRec.cursor / timelineDuration * 1000);
+        if (OpenRec.replaceEnd != null && OpenRec.cursor >= OpenRec.replaceEnd && !OpenRec.stopping) stopOpenRecording();
       },
       onLevel: level => {
         if (!armedListening) return;
@@ -1499,7 +1535,7 @@ async function startOpenRecording(selectionOnly, armedListening = false) {
         }
       }
     });
-    if (!armedListening) await video.play();
+    if (!armedListening && OpenRec.cursor < State.project.duration) await video.play();
   } catch (e) {
     if (Recorder.isRecording()) {
       try { await Recorder.stop({ id: 'open-recording', targetDuration: 1 }, { safetyTailMs: 0 }); } catch (_) {}
@@ -1516,8 +1552,8 @@ async function stopOpenRecording() {
   video.pause();
   const insertAt = OpenRec.recordStart;
   try {
-    const pseudoSegment = { id: 'open-recording', targetDuration: Math.max(0.1, State.project.duration - insertAt) };
-    const take = await Recorder.stop(pseudoSegment, { safetyTailMs: 0 });
+    const pseudoSegment = { id: 'open-recording', targetDuration: Math.max(0.1, OpenRec.recordedElapsed || 1) };
+    const take = await Recorder.stop(pseudoSegment, { safetyTailMs: Recorder.SAFETY_TAIL_MS });
     const state = ensureOpenBuffer();
     pushOpenHistory();
     let base = state.buffer;
@@ -1532,9 +1568,11 @@ async function stopOpenRecording() {
       $('open-rec-status').textContent = OpenRec.listeningMode ? 'No speech captured. Listening again…' : 'No clear speech was captured.';
       return;
     }
-    const maxDuration = (OpenRec.replaceEnd || State.project.duration) - insertAt;
+    const maxDuration = OpenRec.replaceEnd != null ? OpenRec.replaceEnd - insertAt : speechDuration;
     const placedDuration = Math.min(speechDuration, maxDuration);
     const safeAt = findNonOverlappingStart(insertAt, placedDuration);
+    state.duration = Math.max(state.duration, Math.ceil((safeAt + placedDuration + 5) / 30) * 30);
+    base = Recorder.ensureTrackDuration(base, state.duration);
     state.buffer = Recorder.overwriteTrack(base, take.buffer, safeAt, speechStart, placedDuration);
     const clip = { id: `clip-${Date.now()}-${Math.floor(Math.random() * 10000)}`, start: safeAt, end: +(safeAt + placedDuration).toFixed(3), label: `Recording ${state.clips.length + 1}` };
     state.clips.push(clip); state.clips.sort((a, b) => a.start - b.start);
@@ -1542,7 +1580,7 @@ async function stopOpenRecording() {
     state.hasAudio = true; state.saved = false;
     state.edits.push({ type: OpenRec.replaceEnd != null ? 'rerecord' : 'record', at: safeAt, end: clip.end, createdAt: Date.now() });
     OpenRec.cursor = clip.end;
-    video.currentTime = OpenRec.cursor;
+    video.currentTime = Math.min(OpenRec.cursor, State.project.duration);
     $('open-rec-status').className = 'settings-status ok';
     $('open-rec-status').textContent = `✓ Audio saved on the full-clip track. Continue from ${Parsers.secondsToClock(OpenRec.cursor)} or select any part to edit.`;
   } catch (e) {
@@ -1551,15 +1589,13 @@ async function stopOpenRecording() {
     const keepListening = OpenRec.listeningMode;
     OpenRec.recording = false; OpenRec.stopping = false; OpenRec.replaceEnd = null; State.recording = false;
     updateOpenRecordingUI();
-    if (keepListening && OpenRec.cursor < State.project.duration - 0.1) {
-      setTimeout(() => startOpenRecording(false, true), 180);
-    }
+    if (keepListening) setTimeout(() => startOpenRecording(false, true), 180);
   }
 }
 
 function pushOpenHistory() {
   const state = ensureOpenBuffer();
-  OpenRec.history.push({ buffer: Recorder.cloneBuffer(state.buffer), hasAudio: state.hasAudio, edits: [...state.edits], clips: state.clips.map(c => ({ ...c })), saved: !!state.saved });
+  OpenRec.history.push({ buffer: Recorder.cloneBuffer(state.buffer), duration: state.duration, hasAudio: state.hasAudio, edits: [...state.edits], clips: state.clips.map(c => ({ ...c })), saved: !!state.saved });
   if (OpenRec.history.length > 8) OpenRec.history.shift();
 }
 
@@ -1567,7 +1603,7 @@ function undoOpenEdit() {
   const prev = OpenRec.history.pop();
   if (!prev) return;
   const state = ensureOpenBuffer();
-  state.buffer = prev.buffer; state.hasAudio = prev.hasAudio; state.edits = prev.edits;
+  state.buffer = prev.buffer; state.duration = prev.duration || prev.buffer.duration; state.hasAudio = prev.hasAudio; state.edits = prev.edits;
   state.clips = prev.clips || []; state.saved = !!prev.saved; OpenRec.selectedClipId = null;
   $('open-rec-status').className = 'settings-status ok';
   $('open-rec-status').textContent = '✓ Last open-track edit was undone.';
@@ -1578,13 +1614,32 @@ function normalizedOpenSelection() {
   return [Math.min(...OpenRec.selection), Math.max(...OpenRec.selection)];
 }
 function setOpenSelection(a, b) {
-  const d = State.project.duration;
+  const d = openTimelineDuration();
   OpenRec.selection = [Math.max(0, Math.min(d, +a || 0)), Math.max(0, Math.min(d, +b || 0))];
   $('open-sel-start').value = OpenRec.selection[0].toFixed(2);
   $('open-sel-end').value = OpenRec.selection[1].toFixed(2);
   drawOpenWaveform();
 }
 function readOpenSelectionInputs() { setOpenSelection(+$('open-sel-start').value, +$('open-sel-end').value); }
+
+function applyOpenAudioProcess(type) {
+  try {
+    const state = ensureOpenBuffer(), [a, b] = normalizedOpenSelection();
+    if (!state.hasAudio) throw new Error('Record some audio before applying effects.');
+    if (b - a < 0.01) throw new Error('Drag over the waveform to select the audio you want to process.');
+    pushOpenHistory();
+    if (type === 'gain') state.buffer = Recorder.gainTrackRange(state.buffer, a, b, +$('open-gain-db').value || 0);
+    else if (type === 'normalize') state.buffer = Recorder.normalizeTrackRange(state.buffer, a, b, -3);
+    else if (type === 'fade-in') state.buffer = Recorder.fadeTrackRange(state.buffer, a, b, 'in');
+    else if (type === 'fade-out') state.buffer = Recorder.fadeTrackRange(state.buffer, a, b, 'out');
+    else if (type === 'reverse') state.buffer = Recorder.reverseTrackRange(state.buffer, a, b);
+    state.saved = false;
+    state.edits.push({ type, at: a, end: b, value: type === 'gain' ? +$('open-gain-db').value || 0 : null, createdAt: Date.now() });
+    $('open-rec-status').className = 'settings-status ok';
+    $('open-rec-status').textContent = `✓ ${type.replace('-', ' ')} applied to ${Parsers.secondsToClock(a)} → ${Parsers.secondsToClock(b)}. Undo is available.`;
+    updateOpenRecordingUI();
+  } catch (e) { toast(e.message, 'warn'); }
+}
 
 function deleteOpenSelection() {
   try {
@@ -1595,7 +1650,7 @@ function deleteOpenSelection() {
     state.clips = state.clips.flatMap(c => subtractClipRange(c, a, b));
     state.saved = false;
     state.edits.push({ type: 'delete', at: a, end: b, createdAt: Date.now() });
-    OpenRec.cursor = a; $('open-rec-video').currentTime = a;
+    OpenRec.cursor = a; $('open-rec-video').currentTime = Math.min(a, State.project.duration);
     $('open-rec-status').className = 'settings-status ok';
     $('open-rec-status').textContent = `✓ Deleted audio from ${Parsers.secondsToClock(a)} to ${Parsers.secondsToClock(b)}. The video timing did not move.`;
     updateOpenRecordingUI();
@@ -1605,7 +1660,8 @@ function clearOpenTrack() {
   const state = ensureOpenBuffer();
   if (state.hasAudio && !confirm('Clear the entire open recording track? You can undo this once.')) return;
   pushOpenHistory();
-  state.buffer = Recorder.createOpenTrack(State.project.duration, state.buffer.sampleRate);
+  state.duration = Math.max(30, State.project.duration);
+  state.buffer = Recorder.createOpenTrack(state.duration, state.buffer.sampleRate);
   state.hasAudio = false; state.clips = []; state.saved = false; OpenRec.selectedClipId = null;
   state.edits.push({ type: 'clear', createdAt: Date.now() });
   updateOpenRecordingUI();
@@ -1630,7 +1686,7 @@ function findNonOverlappingStart(requested, duration) {
     if (at + duration <= clip.start) break;
     if (at < clip.end && at + duration > clip.start) at = clip.end;
   }
-  return Math.min(Math.max(0, State.project.duration - duration), at);
+  return Math.max(0, at);
 }
 
 function subtractClipRange(clip, from, to) {
@@ -1681,7 +1737,7 @@ async function saveOpenRecordingTrack() {
     if (!regions.length) throw new Error('No clear speech was detected in the recording.');
     pushOpenHistory();
     const original = state.buffer;
-    let aligned = Recorder.createOpenTrack(State.project.duration, original.sampleRate);
+    let aligned = Recorder.createOpenTrack(Math.max(state.duration, original.duration), original.sampleRate);
     const cues = State.project.segments;
     const clips = [];
     let previousEnd = 0, cueIndex = 0;
@@ -1690,14 +1746,15 @@ async function saveOpenRecordingTrack() {
       while (cueIndex + 1 < cues.length && Math.abs(cues[cueIndex + 1].startTime - region.start) < Math.abs(cues[cueIndex].startTime - region.start)) cueIndex++;
       const cue = cues[cueIndex] || null;
       const desired = cue ? (cue.originalSpeechStart ?? cue.startTime) : region.start;
-      const at = Math.min(State.project.duration - duration, Math.max(previousEnd, desired));
+      const at = Math.max(previousEnd, desired);
+      aligned = Recorder.ensureTrackDuration(aligned, at + duration + 1);
       aligned = Recorder.overwriteTrack(aligned, original, at, region.start, duration);
       const end = +(at + duration).toFixed(3);
       clips.push({ id: `clip-ai-${Date.now()}-${i}`, start: +at.toFixed(3), end, label: cue ? `#${cue.lineNumber} ${cue.character}` : `Speech ${i + 1}`, segmentId: cue?.id || null });
       previousEnd = end;
       if (cueIndex < cues.length - 1) cueIndex++;
     });
-    state.buffer = aligned; state.clips = clips; state.hasAudio = true; state.saved = true;
+    state.buffer = aligned; state.duration = aligned.duration; state.clips = clips; state.hasAudio = true; state.saved = true;
     state.edits.push({ type: 'ai-slice-save', clips: clips.length, createdAt: Date.now() });
     OpenRec.selectedClipId = clips[0]?.id || null;
     $('open-rec-status').className = 'settings-status ok';
@@ -1716,7 +1773,8 @@ function playOpenTrack() {
   const src = ac.createBufferSource();
   src.buffer = state.buffer; src.connect(ac.destination);
   OpenRec.playSource = src;
-  video.currentTime = OpenRec.cursor; video.muted = true;
+  if (OpenRec.cursor >= state.buffer.duration) { toast('Move the cursor inside the recorded timeline.', 'warn'); return; }
+  video.currentTime = Math.min(OpenRec.cursor, State.project.duration); video.muted = true;
   src.start(0, OpenRec.cursor);
   src.onended = stopOpenPlayback;
   video.play().catch(() => {});
@@ -1733,7 +1791,8 @@ function bindOpenWaveSelection() {
   const canvas = $('open-wave-canvas');
   const timeAt = e => {
     const r = canvas.getBoundingClientRect();
-    return Math.max(0, Math.min(State.project.duration, ((e.clientX - r.left) / r.width) * State.project.duration));
+    const duration = openTimelineDuration();
+    return Math.max(0, Math.min(duration, ((e.clientX - r.left) / r.width) * duration));
   };
   canvas.addEventListener('pointerdown', e => { canvas.setPointerCapture(e.pointerId); OpenRec.dragStart = timeAt(e); setOpenSelection(OpenRec.dragStart, OpenRec.dragStart); });
   canvas.addEventListener('pointermove', e => { if (OpenRec.dragStart != null) setOpenSelection(OpenRec.dragStart, timeAt(e)); });
@@ -1746,8 +1805,11 @@ function bindOpenWaveSelection() {
 
 function drawOpenWaveform() {
   if (!State.project || !$('modal-open-recording') || $('modal-open-recording').style.display === 'none') return;
+  const content = $('open-timeline-content'), viewport = $('open-timeline-scroll');
+  const cssWidth = Math.max(viewport.clientWidth, viewport.clientWidth * OpenRec.zoom);
+  content.style.width = cssWidth + 'px';
   const canvas = $('open-wave-canvas'), rect = canvas.getBoundingClientRect();
-  const w = Math.max(300, Math.floor(rect.width * devicePixelRatio)), h = Math.floor(120 * devicePixelRatio);
+  const w = Math.max(300, Math.floor(rect.width * devicePixelRatio)), h = Math.floor(150 * devicePixelRatio);
   if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
   const g = canvas.getContext('2d'); g.clearRect(0, 0, w, h); g.fillStyle = '#0f1012'; g.fillRect(0, 0, w, h);
   const state = State.project.openRecording;
@@ -1761,17 +1823,36 @@ function drawOpenWaveform() {
     }
     g.stroke();
   }
-  const [a, b] = normalizedOpenSelection(), duration = State.project.duration;
+  const [a, b] = normalizedOpenSelection(), duration = openTimelineDuration();
   if (b > a) { g.fillStyle = 'rgba(255,176,46,.22)'; g.fillRect(a / duration * w, 0, (b - a) / duration * w, h); }
+  renderOpenTimeRuler(duration);
   renderOpenClips();
-  const cursor = (($('open-rec-video').currentTime || OpenRec.cursor) / duration) * w;
+  const cursor = (OpenRec.cursor / duration) * w;
   g.strokeStyle = '#ff4d4d'; g.lineWidth = 2 * devicePixelRatio; g.beginPath(); g.moveTo(cursor, 0); g.lineTo(cursor, h); g.stroke();
+}
+
+function renderOpenTimeRuler(duration) {
+  const ruler = $('open-time-ruler');
+  if (!ruler) return;
+  const major = duration <= 60 ? 5 : duration <= 300 ? 15 : 30;
+  ruler.innerHTML = '';
+  for (let t = 0; t <= duration; t += major) {
+    const mark = document.createElement('span');
+    mark.style.left = (t / duration * 100) + '%';
+    mark.textContent = Parsers.secondsToClock(t);
+    ruler.appendChild(mark);
+  }
+  const videoEnd = document.createElement('i');
+  videoEnd.className = 'open-video-end';
+  videoEnd.style.left = (Math.min(State.project.duration, duration) / duration * 100) + '%';
+  videoEnd.title = 'Video ends here — voice recording can continue';
+  ruler.appendChild(videoEnd);
 }
 
 function renderOpenClips() {
   const layer = $('open-clip-layer');
   if (!layer || !State.project) return;
-  const state = ensureOpenBuffer(), duration = State.project.duration;
+  const state = ensureOpenBuffer(), duration = openTimelineDuration();
   layer.innerHTML = '';
   state.clips.forEach(clip => {
     const el = document.createElement('div');
@@ -1792,12 +1873,12 @@ function beginClipDrag(event, clip, mode) {
   const layer = $('open-clip-layer'), rect = layer.getBoundingClientRect();
   const origin = { ...clip }, startX = event.clientX;
   const onMove = e => {
-    const delta = (e.clientX - startX) / rect.width * State.project.duration;
+    const delta = (e.clientX - startX) / rect.width * openTimelineDuration();
     if (mode === 'left') clip.start = Math.max(origin.start, Math.min(clip.end - .03, origin.start + delta));
     else if (mode === 'right') clip.end = Math.min(origin.end, Math.max(clip.start + .03, origin.end + delta));
     else {
       const length = origin.end - origin.start;
-      clip.start = Math.max(0, Math.min(State.project.duration - length, origin.start + delta));
+      clip.start = Math.max(0, origin.start + delta);
       clip.end = clip.start + length;
     }
     renderOpenClips();
@@ -1845,7 +1926,8 @@ function findNonOverlappingStartIgnoring(id, requested, duration) {
     if (at + duration <= other.start) break;
     if (at < other.end && at + duration > other.start) at = other.end;
   }
-  return Math.min(Math.max(0, State.project.duration - duration), at);
+  growOpenTimeline(at + duration + 5);
+  return Math.max(0, at);
 }
 
 /* ═══════════════ SETTINGS ═══════════════ */
@@ -2021,10 +2103,16 @@ async function doExport() {
 
   try {
     setP(0.02, 'Rendering mix…');
-    const dur = Math.min(State.project.duration, (AudioEngine.getOriginalBuffer()?.duration) || State.project.duration);
+    const openState = State.project.openRecording;
+    const openContentEnd = openState?.clips?.reduce((max, clip) => Math.max(max, clip.end), 0) || 0;
+    const videoDuration = Math.min(State.project.duration, (AudioEngine.getOriginalBuffer()?.duration) || State.project.duration);
+    // Audio-only exports preserve speech that continues beyond picture lock;
+    // video exports remain the exact source-video duration.
+    const dur = exportFormat === 'mp3' && State.exportVoiceSource === 'open' && mix !== 'music'
+      ? Math.max(videoDuration, openContentEnd)
+      : videoDuration;
     // AI auto-mix level for the music bed (no manual volume control)
     const musicVol = AudioEngine.getAutoMusicGain();
-    const openState = State.project.openRecording;
     if (State.exportVoiceSource === 'open' && mix !== 'music' && (!openState || !openState.hasAudio || !openState.buffer)) {
       throw new Error('The open recording track is empty. Open the full-clip recorder and record audio first.');
     }
@@ -2245,6 +2333,7 @@ async function openProjectBundle(file) {
   if (manifest.openRecording && manifest.openRecording.hasAudio && takeBlobs.has('__open_recording__')) {
     try {
       State.project.openRecording.buffer = await ac.decodeAudioData(await takeBlobs.get('__open_recording__').arrayBuffer());
+      State.project.openRecording.duration = Math.max(manifest.openRecording.duration || 0, State.project.openRecording.buffer.duration, duration);
       State.project.openRecording.hasAudio = true;
       State.project.openRecording.edits = manifest.openRecording.edits || [];
       State.project.openRecording.clips = manifest.openRecording.clips || [];
