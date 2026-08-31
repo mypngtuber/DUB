@@ -24,6 +24,7 @@
   </div>
   <div class="topbar-right">
     <button id="btn-preview-all" class="tb-btn" title="Preview Full Project (P) — whole video with all accepted dubbing takes, acapella" style="display:none"><i class="fa-solid fa-play"></i> Preview Full Project</button>
+    <button id="btn-open-recording" class="tb-btn" title="Open Recording — one editable track for the entire video" style="display:none"><i class="fa-solid fa-wave-square"></i> Open Recording</button>
     <button id="btn-save-project" class="tb-btn" title="Save project bundle (.dubproj.zip) with video, script data and all takes" style="display:none"><i class="fa-solid fa-floppy-disk"></i> Save</button>
     <button id="btn-open-project" class="tb-btn" title="Open a saved .dubproj.zip project bundle"><i class="fa-solid fa-folder-open"></i> Open</button>
     <input type="file" id="file-open-project" accept=".zip,.dubproj,application/zip" hidden>
@@ -105,6 +106,11 @@
     </div>
     <div class="panel-block grow">
       <div class="panel-title" id="queue-title"><i class="fa-solid fa-list-ol"></i> DIALOGUE QUEUE</div>
+      <div class="queue-tools">
+        <button id="btn-merge-mode" title="Select consecutive SRT lines and record them as one performance"><i class="fa-solid fa-link"></i> Merge lines</button>
+        <button id="btn-merge-selected" class="merge-confirm" style="display:none"><i class="fa-solid fa-check"></i> Merge selected</button>
+        <button id="btn-merge-cancel" style="display:none"><i class="fa-solid fa-xmark"></i></button>
+      </div>
       <div id="dialogue-queue" class="dialogue-queue"></div>
     </div>
     <div class="panel-block">
@@ -259,6 +265,51 @@
   </div>
 </div>
 
+<!-- ══════════════════ OPEN RECORDING EDITOR ══════════════════ -->
+<div id="modal-open-recording" class="modal-backdrop" style="display:none">
+  <div class="modal open-rec-modal">
+    <div class="modal-head">
+      <h2><i class="fa-solid fa-wave-square"></i> Open Recording — Full Clip</h2>
+      <button class="modal-close" data-close="modal-open-recording"><i class="fa-solid fa-xmark"></i></button>
+    </div>
+    <div class="open-rec-body">
+      <div class="open-rec-video-wrap">
+        <video id="open-rec-video" playsinline muted></video>
+        <div id="open-rec-time" class="open-rec-time mono">00:00.000 / 00:00.000</div>
+      </div>
+      <div class="open-script" dir="auto">
+        <div id="open-script-character" class="open-script-character">—</div>
+        <div id="open-script-text" class="open-script-text">ابدأ التشغيل ليظهر النص هنا مع تقدم المقطع</div>
+        <div class="open-script-progress"><div id="open-script-progress-fill"></div></div>
+        <div id="open-script-next" class="open-script-next"></div>
+      </div>
+      <div class="open-rec-transport">
+        <button id="open-to-start" class="btn-ghost" title="Go to start"><i class="fa-solid fa-backward-step"></i></button>
+        <button id="open-play-video" class="btn-ghost"><i class="fa-solid fa-play"></i> Play video</button>
+        <button id="open-play-track" class="btn-ghost"><i class="fa-solid fa-headphones"></i> Play recording</button>
+        <button id="open-record" class="btn-primary open-record-btn"><i class="fa-solid fa-circle"></i> Record from cursor</button>
+        <button id="open-stop" class="btn-ghost" disabled><i class="fa-solid fa-stop"></i> Stop</button>
+      </div>
+      <input id="open-seek" class="open-seek" type="range" min="0" max="1000" value="0">
+      <div class="open-wave-editor">
+        <canvas id="open-wave-canvas" height="120" aria-label="Open recording waveform editor"></canvas>
+        <div class="open-wave-help">Drag on the waveform to select audio · click to move the recording cursor</div>
+      </div>
+      <div class="open-edit-grid">
+        <label>Selection start <input id="open-sel-start" type="number" min="0" step="0.01" value="0"></label>
+        <button id="open-set-in" class="btn-ghost"><i class="fa-solid fa-i-cursor"></i> Set IN at cursor</button>
+        <label>Selection end <input id="open-sel-end" type="number" min="0" step="0.01" value="0"></label>
+        <button id="open-set-out" class="btn-ghost"><i class="fa-solid fa-i-cursor"></i> Set OUT at cursor</button>
+        <button id="open-delete-selection" class="btn-ghost open-danger"><i class="fa-solid fa-trash"></i> Delete selected audio</button>
+        <button id="open-record-selection" class="btn-ghost"><i class="fa-solid fa-microphone-lines"></i> Re-record selection</button>
+        <button id="open-undo" class="btn-ghost" disabled><i class="fa-solid fa-rotate-left"></i> Undo edit</button>
+        <button id="open-clear" class="btn-ghost open-danger"><i class="fa-solid fa-eraser"></i> Clear track</button>
+      </div>
+      <div id="open-rec-status" class="settings-status">One project-length track. Recording from the cursor replaces only that range; the rest remains untouched.</div>
+    </div>
+  </div>
+</div>
+
 <!-- ══════════════════ SETTINGS MODAL ══════════════════ -->
 <div id="modal-settings" class="modal-backdrop" style="display:none">
   <div class="modal">
@@ -297,6 +348,11 @@
   <div class="modal">
     <div class="modal-head"><h2><i class="fa-solid fa-file-export"></i> Export Project</h2><button class="modal-close" data-close="modal-export"><i class="fa-solid fa-xmark"></i></button></div>
     <div class="modal-body">
+      <label class="m-label">Voice source</label>
+      <div class="export-source" id="export-voice-source">
+        <button data-source="segments" class="active"><i class="fa-solid fa-layer-group"></i> Accepted segments</button>
+        <button data-source="open"><i class="fa-solid fa-wave-square"></i> Open recording track</button>
+      </div>
       <div class="export-options" id="export-mix-options">
         <label class="export-opt"><input type="radio" name="export-mix" value="full" checked><div><b>Full Dub</b><span>Dubbing + Music (with video for MP4)</span></div></label>
         <label class="export-opt"><input type="radio" name="export-mix" value="dub"><div><b>Dubbing Only</b><span>Your accepted recordings, placed at exact segment times</span></div></label>

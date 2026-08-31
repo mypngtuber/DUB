@@ -17,6 +17,9 @@ const State = {
   activeUser: null,
   ownerView: false,
   playStopTimer: null,
+  mergeMode: false,
+  mergeSelection: new Set(),
+  exportVoiceSource: 'segments',
   autoEnhance: localStorage.getItem('dubstudio.autoEnhance') === 'on'
 };
 
@@ -162,8 +165,10 @@ async function createProject() {
     State.project = {
       name, videoURL, videoFile: setupFiles.video, duration,
       segments, characters: buildCharacterIndex(segments),
-      srtErrors: srt.errors, scriptErrors: script.errors
+      srtErrors: srt.errors, scriptErrors: script.errors,
+      openRecording: createOpenRecordingState(duration)
     };
+    resetOpenRecordingSession();
     pipelineStep('timeline', 'done');
 
     setTimeout(() => {
@@ -207,7 +212,8 @@ function enterWorkspace() {
   $('workspace').style.display = 'grid';
   $('topbar-progress').style.display = '';
   $('project-name-label').textContent = State.project.name;
-  ['btn-focus-mode', 'btn-export', 'btn-user-mode', 'btn-preview-all', 'btn-save-project'].forEach(id => $(id).style.display = '');
+  ['btn-focus-mode', 'btn-export', 'btn-user-mode', 'btn-preview-all', 'btn-open-recording', 'btn-save-project'].forEach(id => $(id).style.display = '');
+  if (!State.project.openRecording) State.project.openRecording = createOpenRecordingState(State.project.duration);
 
   Timeline.init({ onSelect: id => selectSegment(id) });
   Timeline.setData(State.project.segments, State.project.duration);
@@ -286,13 +292,59 @@ function renderQueue() {
   for (const seg of visibleSegments()) {
     const [icon, cls] = STATUS_QICON[seg.status] || STATUS_QICON.empty;
     const el = document.createElement('div');
-    el.className = 'q-item' + (seg.id === State.currentSegmentId ? ' current' : '');
-    el.innerHTML = `<span class="q-num">${String(seg.lineNumber).padStart(3, '0')}</span><span class="q-text"></span><span class="q-status ${cls}">${icon}</span>`;
+    const picked = State.mergeSelection.has(seg.id);
+    el.className = 'q-item' + (seg.id === State.currentSegmentId ? ' current' : '') + (picked ? ' merge-picked' : '');
+    const mergedCount = (seg.sourceLineNumbers || []).length;
+    el.innerHTML = `${State.mergeMode ? `<input class="q-merge-check" type="checkbox" ${picked ? 'checked' : ''} aria-label="Select line for merge">` : ''}` +
+      `<span class="q-num">${String(seg.lineNumber).padStart(3, '0')}</span><span class="q-text"></span>` +
+      `${mergedCount > 1 ? `<span class="q-merged-badge">${mergedCount} lines</span>` : ''}<span class="q-status ${cls}">${icon}</span>`;
     el.querySelector('.q-text').textContent = seg.activeText;
     el.title = `${seg.character} — ${Timeline.statusLabel(seg.status)}`;
-    el.addEventListener('click', () => selectSegment(seg.id));
+    el.addEventListener('click', e => {
+      if (State.mergeMode) {
+        e.preventDefault();
+        if (State.mergeSelection.has(seg.id)) State.mergeSelection.delete(seg.id); else State.mergeSelection.add(seg.id);
+        renderQueue();
+      } else selectSegment(seg.id);
+    });
     wrap.appendChild(el);
   }
+}
+
+function initMergeControls() {
+  $('btn-merge-mode').addEventListener('click', () => {
+    if (State.recording) return;
+    State.mergeMode = true;
+    State.mergeSelection.clear();
+    $('btn-merge-mode').style.display = 'none';
+    $('btn-merge-selected').style.display = '';
+    $('btn-merge-cancel').style.display = '';
+    renderQueue();
+    toast('Select two or more consecutive lines for the same character, then press Merge selected.', 'info', 6000);
+  });
+  $('btn-merge-cancel').addEventListener('click', exitMergeMode);
+  $('btn-merge-selected').addEventListener('click', () => {
+    try {
+      const result = Parsers.mergeSegments(State.project.segments, [...State.mergeSelection]);
+      State.project.segments = result.segments;
+      State.project.characters = buildCharacterIndex(result.segments);
+      exitMergeMode(false);
+      Timeline.setData(result.segments, State.project.duration);
+      renderCharacters(); renderQueue(); renderProgress();
+      selectSegment(result.merged.id);
+      const lines = result.merged.sourceLineNumbers.join(', ');
+      toast(`Merged SRT lines ${lines} into one ${result.merged.targetDuration.toFixed(2)}s recording performance.`, 'ok', 6500);
+    } catch (e) { toast(e.message, 'error', 6500); }
+  });
+}
+
+function exitMergeMode(render = true) {
+  State.mergeMode = false;
+  State.mergeSelection.clear();
+  $('btn-merge-mode').style.display = '';
+  $('btn-merge-selected').style.display = 'none';
+  $('btn-merge-cancel').style.display = 'none';
+  if (render) renderQueue();
 }
 
 function renderProgress() {
@@ -350,7 +402,10 @@ function selectSegment(id) {
 }
 
 function renderDialogueStage(seg) {
-  $('ds-line').textContent = 'Line ' + String(seg.lineNumber).padStart(3, '0');
+  const sourceLines = seg.sourceLineNumbers || [seg.lineNumber];
+  $('ds-line').textContent = sourceLines.length > 1
+    ? `Lines ${sourceLines.join(' + ')}`
+    : 'Line ' + String(seg.lineNumber).padStart(3, '0');
   $('ds-character').textContent = seg.character;
   $('ds-character').style.color = charColor(seg.character);
   $('ds-text').textContent = seg.activeText;
@@ -1235,15 +1290,319 @@ function updateFocusView() {
     `SEGMENT #${String(seg.lineNumber).padStart(3, '0')} · ${Timeline.statusLabel(seg.status)} · ${seg.takes.length} take(s)`;
 }
 
+/* ═══════════════ OPEN RECORDING — FULL CLIP ═══════════════ */
+
+const OpenRec = { recording: false, stopping: false, cursor: 0, recordStart: 0, selection: [0, 0], replaceEnd: null, playSource: null, history: [], dragStart: null };
+
+function createOpenRecordingState(duration) {
+  return { buffer: null, hasAudio: false, duration, edits: [] };
+}
+
+function resetOpenRecordingSession() {
+  stopOpenPlayback();
+  OpenRec.recording = false; OpenRec.stopping = false; OpenRec.cursor = 0; OpenRec.recordStart = 0;
+  OpenRec.selection = [0, 0]; OpenRec.replaceEnd = null; OpenRec.history = [];
+}
+
+function openRecordingEditor() {
+  if (!State.project || State.recording) return;
+  const video = $('open-rec-video');
+  video.src = State.project.videoURL;
+  video.currentTime = Math.min(OpenRec.cursor, State.project.duration);
+  $('open-sel-start').max = State.project.duration;
+  $('open-sel-end').max = State.project.duration;
+  openModal('modal-open-recording');
+  updateOpenRecordingUI();
+  drawOpenWaveform();
+}
+
+function initOpenRecording() {
+  $('btn-open-recording').addEventListener('click', openRecordingEditor);
+  const video = $('open-rec-video');
+  video.addEventListener('timeupdate', () => {
+    OpenRec.cursor = video.currentTime;
+    updateOpenRecordingUI();
+    if (OpenRec.recording && OpenRec.replaceEnd != null && video.currentTime >= OpenRec.replaceEnd) stopOpenRecording();
+  });
+  video.addEventListener('ended', () => { if (OpenRec.recording) stopOpenRecording(); else stopOpenPlayback(); });
+  $('open-seek').addEventListener('input', e => setOpenCursor((+e.target.value / 1000) * State.project.duration));
+  $('open-play-video').addEventListener('click', () => {
+    if (OpenRec.playSource) { stopOpenPlayback(); return; }
+    video.muted = true;
+    if (video.paused) video.play().catch(() => {}); else video.pause();
+    updateOpenTransport();
+  });
+  $('open-to-start').addEventListener('click', () => setOpenCursor(0));
+  $('open-play-track').addEventListener('click', playOpenTrack);
+  $('open-record').addEventListener('click', () => startOpenRecording(false));
+  $('open-record-selection').addEventListener('click', () => startOpenRecording(true));
+  $('open-stop').addEventListener('click', () => OpenRec.recording ? stopOpenRecording() : stopOpenPlayback());
+  $('open-set-in').addEventListener('click', () => setOpenSelection(OpenRec.cursor, OpenRec.selection[1]));
+  $('open-set-out').addEventListener('click', () => setOpenSelection(OpenRec.selection[0], OpenRec.cursor));
+  $('open-sel-start').addEventListener('change', readOpenSelectionInputs);
+  $('open-sel-end').addEventListener('change', readOpenSelectionInputs);
+  $('open-delete-selection').addEventListener('click', deleteOpenSelection);
+  $('open-clear').addEventListener('click', clearOpenTrack);
+  $('open-undo').addEventListener('click', undoOpenEdit);
+  bindOpenWaveSelection();
+}
+
+function setOpenCursor(seconds) {
+  const duration = State.project.duration;
+  OpenRec.cursor = Math.max(0, Math.min(duration, seconds || 0));
+  const video = $('open-rec-video');
+  video.pause();
+  video.currentTime = OpenRec.cursor;
+  stopOpenPlayback();
+  updateOpenRecordingUI();
+}
+
+function updateOpenRecordingUI() {
+  if (!State.project) return;
+  const duration = State.project.duration;
+  const video = $('open-rec-video');
+  const time = Number.isFinite(video.currentTime) ? video.currentTime : OpenRec.cursor;
+  $('open-rec-time').textContent = `${Parsers.secondsToClock(time)} / ${Parsers.secondsToClock(duration)}`;
+  $('open-seek').value = duration ? Math.round(time / duration * 1000) : 0;
+  updateOpenScript(time);
+  updateOpenTransport();
+  drawOpenWaveform();
+}
+
+function updateOpenScript(time) {
+  const segs = State.project.segments;
+  const index = segs.findIndex(s => time >= s.startTime && time < s.endTime);
+  const seg = index >= 0 ? segs[index] : null;
+  if (!seg) {
+    $('open-script-character').textContent = '—';
+    $('open-script-text').textContent = '…';
+    $('open-script-next').textContent = '';
+    $('open-script-progress-fill').style.width = '0%';
+    return;
+  }
+  $('open-script-character').textContent = seg.character;
+  $('open-script-character').style.color = charColor(seg.character);
+  $('open-script-text').textContent = seg.activeText;
+  const progress = (time - seg.startTime) / Math.max(0.01, seg.endTime - seg.startTime);
+  $('open-script-progress-fill').style.width = Math.max(0, Math.min(100, progress * 100)) + '%';
+  const next = segs[index + 1];
+  $('open-script-next').textContent = next ? `التالي: ${next.activeText}` : '';
+}
+
+function updateOpenTransport() {
+  const recording = OpenRec.recording;
+  const playing = !$('open-rec-video').paused;
+  $('open-record').disabled = recording;
+  $('open-record-selection').disabled = recording;
+  $('open-play-video').disabled = recording;
+  $('open-play-track').disabled = recording;
+  $('open-stop').disabled = !recording && !playing && !OpenRec.playSource;
+  $('open-record').classList.toggle('recording', recording);
+  $('open-record').innerHTML = recording ? '<i class="fa-solid fa-circle"></i> Recording…' : '<i class="fa-solid fa-circle"></i> Record from cursor';
+  $('open-play-video').innerHTML = playing && !OpenRec.playSource ? '<i class="fa-solid fa-pause"></i> Pause video' : '<i class="fa-solid fa-play"></i> Play video';
+  $('open-undo').disabled = !OpenRec.history.length;
+}
+
+function ensureOpenBuffer() {
+  const state = State.project.openRecording || (State.project.openRecording = createOpenRecordingState(State.project.duration));
+  if (!state.buffer) state.buffer = Recorder.createOpenTrack(State.project.duration);
+  return state;
+}
+
+async function startOpenRecording(selectionOnly) {
+  if (OpenRec.recording || State.recording) return;
+  readOpenSelectionInputs();
+  if (selectionOnly) {
+    const [a, b] = normalizedOpenSelection();
+    if (b - a < 0.05) { toast('Select the part you want to re-record first.', 'warn'); return; }
+    OpenRec.cursor = a; OpenRec.replaceEnd = b;
+  } else OpenRec.replaceEnd = null;
+  const go = await runCountdown(3, selectionOnly ? 'RE-RECORD SELECTION…' : 'OPEN RECORDING…');
+  if (!go) return;
+  try {
+    await Recorder.ensureMic();
+    stopOpenPlayback();
+    const video = $('open-rec-video');
+    video.currentTime = OpenRec.cursor;
+    OpenRec.recordStart = OpenRec.cursor;
+    video.muted = true;
+    const pseudoSegment = { id: 'open-recording', targetDuration: Math.max(0.1, (OpenRec.replaceEnd || State.project.duration) - OpenRec.cursor) };
+    OpenRec.recording = true;
+    OpenRec.stopping = false;
+    State.recording = true;
+    updateOpenTransport();
+    $('open-rec-status').className = 'settings-status err';
+    $('open-rec-status').textContent = `● Recording from ${Parsers.secondsToClock(OpenRec.cursor)} — press Stop at any time.`;
+    await Recorder.start(pseudoSegment, {
+      onTick: elapsed => {
+        const end = OpenRec.replaceEnd || State.project.duration;
+        if (OpenRec.recordStart + elapsed >= end && !OpenRec.stopping) stopOpenRecording();
+      }
+    });
+    await video.play();
+  } catch (e) {
+    if (Recorder.isRecording()) {
+      try { await Recorder.stop({ id: 'open-recording', targetDuration: 1 }, { safetyTailMs: 0 }); } catch (_) {}
+    }
+    OpenRec.recording = false; State.recording = false; updateOpenTransport();
+    toast(e.message, 'error', 6500);
+  }
+}
+
+async function stopOpenRecording() {
+  if (!OpenRec.recording || OpenRec.stopping) return;
+  OpenRec.stopping = true;
+  const video = $('open-rec-video');
+  video.pause();
+  const insertAt = OpenRec.recordStart;
+  try {
+    const pseudoSegment = { id: 'open-recording', targetDuration: Math.max(0.1, State.project.duration - insertAt) };
+    const take = await Recorder.stop(pseudoSegment, { safetyTailMs: 0 });
+    const state = ensureOpenBuffer();
+    pushOpenHistory();
+    let base = state.buffer;
+    if (OpenRec.replaceEnd != null) base = Recorder.silenceTrackRange(base, insertAt, OpenRec.replaceEnd);
+    const maxDuration = (OpenRec.replaceEnd || State.project.duration) - insertAt;
+    state.buffer = Recorder.overwriteTrack(base, take.buffer, insertAt, 0, Math.min(take.buffer.duration, maxDuration));
+    state.hasAudio = true;
+    state.edits.push({ type: OpenRec.replaceEnd != null ? 'rerecord' : 'record', at: insertAt, end: +(insertAt + Math.min(take.buffer.duration, maxDuration)).toFixed(3), createdAt: Date.now() });
+    OpenRec.cursor = Math.min(State.project.duration, insertAt + Math.min(take.buffer.duration, maxDuration));
+    video.currentTime = OpenRec.cursor;
+    $('open-rec-status').className = 'settings-status ok';
+    $('open-rec-status').textContent = `✓ Audio saved on the full-clip track. Continue from ${Parsers.secondsToClock(OpenRec.cursor)} or select any part to edit.`;
+  } catch (e) {
+    toast('Open recording failed: ' + e.message, 'error', 6500);
+  } finally {
+    OpenRec.recording = false; OpenRec.stopping = false; OpenRec.replaceEnd = null; State.recording = false;
+    updateOpenRecordingUI();
+  }
+}
+
+function pushOpenHistory() {
+  const state = ensureOpenBuffer();
+  OpenRec.history.push({ buffer: Recorder.cloneBuffer(state.buffer), hasAudio: state.hasAudio, edits: [...state.edits] });
+  if (OpenRec.history.length > 8) OpenRec.history.shift();
+}
+
+function undoOpenEdit() {
+  const prev = OpenRec.history.pop();
+  if (!prev) return;
+  const state = ensureOpenBuffer();
+  state.buffer = prev.buffer; state.hasAudio = prev.hasAudio; state.edits = prev.edits;
+  $('open-rec-status').className = 'settings-status ok';
+  $('open-rec-status').textContent = '✓ Last open-track edit was undone.';
+  updateOpenRecordingUI();
+}
+
+function normalizedOpenSelection() {
+  return [Math.min(...OpenRec.selection), Math.max(...OpenRec.selection)];
+}
+function setOpenSelection(a, b) {
+  const d = State.project.duration;
+  OpenRec.selection = [Math.max(0, Math.min(d, +a || 0)), Math.max(0, Math.min(d, +b || 0))];
+  $('open-sel-start').value = OpenRec.selection[0].toFixed(2);
+  $('open-sel-end').value = OpenRec.selection[1].toFixed(2);
+  drawOpenWaveform();
+}
+function readOpenSelectionInputs() { setOpenSelection(+$('open-sel-start').value, +$('open-sel-end').value); }
+
+function deleteOpenSelection() {
+  try {
+    const state = ensureOpenBuffer(), [a, b] = normalizedOpenSelection();
+    if (b - a < 0.01) throw new Error('Select an audio range before deleting.');
+    pushOpenHistory();
+    state.buffer = Recorder.silenceTrackRange(state.buffer, a, b);
+    state.edits.push({ type: 'delete', at: a, end: b, createdAt: Date.now() });
+    OpenRec.cursor = a; $('open-rec-video').currentTime = a;
+    $('open-rec-status').className = 'settings-status ok';
+    $('open-rec-status').textContent = `✓ Deleted audio from ${Parsers.secondsToClock(a)} to ${Parsers.secondsToClock(b)}. The video timing did not move.`;
+    updateOpenRecordingUI();
+  } catch (e) { toast(e.message, 'warn'); }
+}
+function clearOpenTrack() {
+  const state = ensureOpenBuffer();
+  if (state.hasAudio && !confirm('Clear the entire open recording track? You can undo this once.')) return;
+  pushOpenHistory();
+  state.buffer = Recorder.createOpenTrack(State.project.duration, state.buffer.sampleRate);
+  state.hasAudio = false; state.edits.push({ type: 'clear', createdAt: Date.now() });
+  updateOpenRecordingUI();
+}
+
+function playOpenTrack() {
+  const state = ensureOpenBuffer();
+  if (!state.hasAudio) { toast('The open recording track is empty. Record from the cursor first.', 'warn'); return; }
+  stopOpenPlayback();
+  const ac = AudioEngine.getCtx();
+  const video = $('open-rec-video');
+  const src = ac.createBufferSource();
+  src.buffer = state.buffer; src.connect(ac.destination);
+  OpenRec.playSource = src;
+  video.currentTime = OpenRec.cursor; video.muted = true;
+  src.start(0, OpenRec.cursor);
+  src.onended = stopOpenPlayback;
+  video.play().catch(() => {});
+  updateOpenTransport();
+}
+function stopOpenPlayback() {
+  if (OpenRec.playSource) { try { OpenRec.playSource.onended = null; OpenRec.playSource.stop(); } catch (e) {} OpenRec.playSource = null; }
+  const video = $('open-rec-video');
+  if (video && !video.paused) video.pause();
+  updateOpenTransport();
+}
+
+function bindOpenWaveSelection() {
+  const canvas = $('open-wave-canvas');
+  const timeAt = e => {
+    const r = canvas.getBoundingClientRect();
+    return Math.max(0, Math.min(State.project.duration, ((e.clientX - r.left) / r.width) * State.project.duration));
+  };
+  canvas.addEventListener('pointerdown', e => { canvas.setPointerCapture(e.pointerId); OpenRec.dragStart = timeAt(e); setOpenSelection(OpenRec.dragStart, OpenRec.dragStart); });
+  canvas.addEventListener('pointermove', e => { if (OpenRec.dragStart != null) setOpenSelection(OpenRec.dragStart, timeAt(e)); });
+  canvas.addEventListener('pointerup', e => {
+    const t = timeAt(e), moved = Math.abs(t - OpenRec.dragStart);
+    if (moved < 0.05) setOpenCursor(t); else setOpenSelection(OpenRec.dragStart, t);
+    OpenRec.dragStart = null;
+  });
+}
+
+function drawOpenWaveform() {
+  if (!State.project || !$('modal-open-recording') || $('modal-open-recording').style.display === 'none') return;
+  const canvas = $('open-wave-canvas'), rect = canvas.getBoundingClientRect();
+  const w = Math.max(300, Math.floor(rect.width * devicePixelRatio)), h = Math.floor(120 * devicePixelRatio);
+  if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+  const g = canvas.getContext('2d'); g.clearRect(0, 0, w, h); g.fillStyle = '#0f1012'; g.fillRect(0, 0, w, h);
+  const state = State.project.openRecording;
+  if (state && state.buffer && state.hasAudio) {
+    const data = state.buffer.getChannelData(0), step = Math.max(1, Math.floor(data.length / w));
+    g.strokeStyle = '#4f8cff'; g.lineWidth = Math.max(1, devicePixelRatio); g.beginPath();
+    for (let x = 0; x < w; x++) {
+      let min = 1, max = -1;
+      for (let i = x * step; i < Math.min(data.length, (x + 1) * step); i++) { min = Math.min(min, data[i]); max = Math.max(max, data[i]); }
+      g.moveTo(x, h / 2 + min * h * .44); g.lineTo(x, h / 2 + max * h * .44);
+    }
+    g.stroke();
+  }
+  const [a, b] = normalizedOpenSelection(), duration = State.project.duration;
+  if (b > a) { g.fillStyle = 'rgba(255,176,46,.22)'; g.fillRect(a / duration * w, 0, (b - a) / duration * w, h); }
+  const cursor = (($('open-rec-video').currentTime || OpenRec.cursor) / duration) * w;
+  g.strokeStyle = '#ff4d4d'; g.lineWidth = 2 * devicePixelRatio; g.beginPath(); g.moveTo(cursor, 0); g.lineTo(cursor, h); g.stroke();
+}
+
 /* ═══════════════ SETTINGS ═══════════════ */
 
 function openModal(id) { $(id).style.display = 'flex'; }
-function closeModal(id) { $(id).style.display = 'none'; }
+function closeModal(id) {
+  if (id === 'modal-open-recording') {
+    if (OpenRec.recording) { toast('Stop the open recording before closing the editor.', 'warn'); return; }
+    stopOpenPlayback();
+  }
+  $(id).style.display = 'none';
+}
 
 function initSettings() {
   $('btn-settings').addEventListener('click', () => { populateSettings(); openModal('modal-settings'); });
   document.querySelectorAll('.modal-close').forEach(b => b.addEventListener('click', () => closeModal(b.dataset.close)));
-  document.querySelectorAll('.modal-backdrop').forEach(m => m.addEventListener('click', e => { if (e.target === m) m.style.display = 'none'; }));
+  document.querySelectorAll('.modal-backdrop').forEach(m => m.addEventListener('click', e => { if (e.target === m) closeModal(m.id); }));
 
   $('toggle-key-visibility').addEventListener('click', () => {
     const inp = $('setting-api-key');
@@ -1374,6 +1733,11 @@ let exportFormat = 'mp3';
 
 function initExport() {
   $('btn-export').addEventListener('click', () => openModal('modal-export'));
+  $('export-voice-source').addEventListener('click', e => {
+    const b = e.target.closest('button'); if (!b) return;
+    State.exportVoiceSource = b.dataset.source;
+    document.querySelectorAll('#export-voice-source button').forEach(x => x.classList.toggle('active', x === b));
+  });
   $('export-format').addEventListener('click', e => {
     const b = e.target.closest('button'); if (!b) return;
     exportFormat = b.dataset.fmt;
@@ -1400,7 +1764,12 @@ async function doExport() {
     const dur = Math.min(State.project.duration, (AudioEngine.getOriginalBuffer()?.duration) || State.project.duration);
     // AI auto-mix level for the music bed (no manual volume control)
     const musicVol = AudioEngine.getAutoMusicGain();
-    const buffer = await Exporter.renderMix(seg, mix, dur, musicVol);
+    const openState = State.project.openRecording;
+    if (State.exportVoiceSource === 'open' && mix !== 'music' && (!openState || !openState.hasAudio || !openState.buffer)) {
+      throw new Error('The open recording track is empty. Open the full-clip recorder and record audio first.');
+    }
+    const openBuffer = State.exportVoiceSource === 'open' ? openState.buffer : null;
+    const buffer = await Exporter.renderMix(seg, mix, dur, musicVol, openBuffer);
     const base = State.project.name.replace(/[^\w\u0600-\u06FF-]+/g, '_');
     const mixName = { full: 'full-dub', dub: 'dubbing-only', music: 'music-only' }[mix];
 
@@ -1560,6 +1929,8 @@ async function openProjectBundle(file) {
       needsCharacterReview: sm.needsCharacterReview,
       acceptedTakeId: sm.acceptedTakeId || null, aiBestTakeId: sm.aiBestTakeId || null,
       aiSuggestions: sm.aiSuggestions || [],
+      sourceLineNumbers: sm.sourceLineNumbers || [sm.lineNumber],
+      sourceSegmentIds: sm.sourceSegmentIds || [sm.id],
       takes: []
     };
 
@@ -1603,11 +1974,20 @@ async function openProjectBundle(file) {
     segments.push(seg);
   }
 
+  resetOpenRecordingSession();
   State.project = {
     name: manifest.name, videoURL, videoFile, duration,
     segments, characters: buildCharacterIndex(segments),
-    srtErrors: manifest.srtErrors || [], scriptErrors: manifest.scriptErrors || []
+    srtErrors: manifest.srtErrors || [], scriptErrors: manifest.scriptErrors || [],
+    openRecording: createOpenRecordingState(duration)
   };
+  if (manifest.openRecording && manifest.openRecording.hasAudio && takeBlobs.has('__open_recording__')) {
+    try {
+      State.project.openRecording.buffer = await ac.decodeAudioData(await takeBlobs.get('__open_recording__').arrayBuffer());
+      State.project.openRecording.hasAudio = true;
+      State.project.openRecording.edits = manifest.openRecording.edits || [];
+    } catch (e) { console.warn('Open recording track could not be restored:', e); }
+  }
   State.userMode = manifest.userMode || 'single';
   State.assignments = manifest.assignments || {};
   State.activeUser = manifest.activeUser || null;
@@ -1642,6 +2022,8 @@ document.addEventListener('DOMContentLoaded', () => {
   initVideo();
   initReferenceControls();
   initTransport();
+  initMergeControls();
+  initOpenRecording();
   initSettings();
   initUserMode();
   initExport();

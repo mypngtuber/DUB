@@ -19,7 +19,7 @@ const Exporter = (() => {
    * mix: 'full' (dub+music) | 'dub' | 'music'
    * Returns AudioBuffer (stereo, 44.1kHz).
    */
-  async function renderMix(segments, mix, duration, musicVolume) {
+  async function renderMix(segments, mix, duration, musicVolume, openRecordingBuffer = null) {
     const sr = 44100;
     const len = Math.max(1, Math.ceil(duration * sr));
     const off = new OfflineAudioContext(2, len, sr);
@@ -37,7 +37,7 @@ const Exporter = (() => {
         // ~6 dB under every accepted voice segment (80ms dip / 250ms recover)
         const duck = bed * 0.5;
         for (const s of segments) {
-          if (!s.acceptedTakeId) continue;
+          if (!openRecordingBuffer && !s.acceptedTakeId) continue;
           const t0 = Math.max(0, s.startTime - 0.08);
           const t1 = Math.min(duration, s.endTime + 0.05);
           g.gain.setValueAtTime(bed, Math.max(0, t0 - 0.001));
@@ -52,20 +52,28 @@ const Exporter = (() => {
 
     if (mix === 'full' || mix === 'dub') {
       let placed = 0;
-      for (const seg of segments) {
-        if (!seg.acceptedTakeId) continue;
-        const take = seg.takes.find(t => t.id === seg.acceptedTakeId);
-        if (!take) continue;
-        // fitted > AI-enhanced > raw-trimmed
-        const eff = (window.Enhancer && Enhancer.effectiveAudio)
-          ? Enhancer.effectiveAudio(take)
-          : { buffer: take.buffer, start: take.trimStart, duration: take.trimEnd - take.trimStart };
+      if (openRecordingBuffer) {
         const src = off.createBufferSource();
-        src.buffer = eff.buffer;
+        src.buffer = openRecordingBuffer;
         src.connect(off.destination);
-        // exact segment placement — the segment's start time is authoritative
-        src.start(seg.startTime, eff.start, Math.min(eff.duration, seg.targetDuration + 0.4));
-        placed++;
+        src.start(0, 0, Math.min(duration, openRecordingBuffer.duration));
+        placed = 1;
+      } else {
+        for (const seg of segments) {
+          if (!seg.acceptedTakeId) continue;
+          const take = seg.takes.find(t => t.id === seg.acceptedTakeId);
+          if (!take) continue;
+          // fitted > AI-enhanced > raw-trimmed
+          const eff = (window.Enhancer && Enhancer.effectiveAudio)
+            ? Enhancer.effectiveAudio(take)
+            : { buffer: take.buffer, start: take.trimStart, duration: take.trimEnd - take.trimStart };
+          const src = off.createBufferSource();
+          src.buffer = eff.buffer;
+          src.connect(off.destination);
+          // exact segment placement — the segment's start time is authoritative
+          src.start(seg.startTime, eff.start, Math.min(eff.duration, seg.targetDuration + 0.4));
+          placed++;
+        }
       }
       if ((mix === 'dub') && placed === 0) throw new Error('No accepted takes yet — record and accept at least one line first.');
     }
