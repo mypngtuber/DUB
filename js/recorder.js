@@ -11,6 +11,17 @@
 'use strict';
 
 const Recorder = (() => {
+  /* ── SAFETY TAIL (post-recording safety time) ──────────
+     When STOP is pressed the microphone keeps capturing for a
+     short safety period before the MediaRecorder is actually
+     stopped. This prevents the classic end-clipping problem:
+     the actor presses STOP while the last word is still decaying
+     (or the encoder is still flushing its final frames) and the
+     tail of the take gets destroyed. */
+  const SAFETY_TAIL_MS = 800;   // extra capture time after STOP
+  const TAIL_PAD_SEC   = 0.20;  // decay padding kept after the last detected speech frame
+  const HEAD_PAD_SEC   = 0.05;  // small attack padding before the first speech frame
+
   let mediaStream = null;
   let mediaRecorder = null;
   let chunks = [];
@@ -87,8 +98,12 @@ const Recorder = (() => {
 
   /**
    * Stop and return a fully analyzed take object bound to the segment.
+   * The recorder does NOT stop immediately: it keeps capturing for a
+   * safety-tail period (default 800 ms) so the end of the take is
+   * never clipped. `onSafetyTail(ms)` lets the UI show feedback while
+   * the tail is being captured.
    */
-  function stop(segment) {
+  function stop(segment, { safetyTailMs = SAFETY_TAIL_MS, onSafetyTail } = {}) {
     return new Promise((resolve, reject) => {
       if (!recording || !mediaRecorder) return reject(new Error('Not recording.'));
       recording = false;
@@ -140,7 +155,19 @@ const Recorder = (() => {
           resolve(take);
         } catch (err) { reject(err); }
       };
-      try { mediaRecorder.stop(); } catch (e) { reject(new Error('Failed to stop the recorder: ' + e.message)); }
+      const doStop = () => {
+        try { mediaRecorder.stop(); } catch (e) { reject(new Error('Failed to stop the recorder: ' + e.message)); }
+      };
+
+      // ── safety tail: keep the mic rolling briefly after STOP so the
+      //    tail of the last word (and the encoder flush) is never cut.
+      if (safetyTailMs > 0 && mediaRecorder.state === 'recording') {
+        if (onSafetyTail) { try { onSafetyTail(safetyTailMs); } catch (e) {} }
+        try { mediaRecorder.requestData(); } catch (e) {}
+        setTimeout(doStop, safetyTailMs);
+      } else {
+        doStop();
+      }
     });
   }
 
@@ -178,13 +205,22 @@ const Recorder = (() => {
                flags: ['No speech detected — the take is silent or too quiet.'] };
     }
 
-    const trimStart = +(first * win / sr).toFixed(3);
-    const trimEnd = +Math.min(((last + 1) * win) / sr, buffer.duration).toFixed(3);
-    const speechDuration = +(trimEnd - trimStart).toFixed(3);
+    // Actual speech boundaries (used for timing verdicts — unpadded).
+    const speechStart = first * win / sr;
+    const speechEnd = Math.min(((last + 1) * win) / sr, buffer.duration);
+
+    // Head/tail SAFETY padding on the trim points: keep a little audio
+    // around the detected speech so consonant attacks and the natural
+    // decay of the last word are never destroyed by the auto-trim
+    // (end-clipping protection). Timing is still judged on the real
+    // speech duration, so verdicts are unaffected by the padding.
+    const trimStart = +Math.max(0, speechStart - HEAD_PAD_SEC).toFixed(3);
+    const trimEnd = +Math.min(speechEnd + TAIL_PAD_SEC, buffer.duration).toFixed(3);
+    const speechDuration = +(speechEnd - speechStart).toFixed(3);
     const diff = +(speechDuration - targetDuration).toFixed(3);
     const clipping = clippedSamples > sr * 0.01;
-    const leadingSilence = trimStart;
-    const trailingSilence = +(buffer.duration - trimEnd).toFixed(3);
+    const leadingSilence = +speechStart.toFixed(3);
+    const trailingSilence = +(buffer.duration - speechEnd).toFixed(3);
 
     // internal gap check → possible clipped/incomplete words
     let longestGap = 0, gap = 0;
@@ -364,5 +400,5 @@ const Recorder = (() => {
     if (mediaStream) { mediaStream.getTracks().forEach(t => t.stop()); mediaStream = null; }
   }
 
-  return { ensureMic, start, stop, isRecording, playTake, playTakeRaw, stopTake, canFit, fitToTarget, releaseMic, analyzeTakeBuffer, scoreTake, selectBestTake };
+  return { ensureMic, start, stop, isRecording, playTake, playTakeRaw, stopTake, canFit, fitToTarget, releaseMic, analyzeTakeBuffer, scoreTake, selectBestTake, SAFETY_TAIL_MS };
 })();
