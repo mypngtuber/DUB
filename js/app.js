@@ -751,7 +751,16 @@ async function stopRecording({ keepMultiTake = false } = {}) {
 
   let take;
   try {
-    take = await Recorder.stop(seg);
+    take = await Recorder.stop(seg, {
+      // Post-recording SAFETY TAIL: the mic keeps rolling briefly after
+      // STOP so the end of the last word is never clipped/destroyed.
+      onSafetyTail: ms => {
+        const v1 = $('rec-timer-verdict');
+        if (v1) { v1.textContent = `⏳ SAFETY TAIL… (+${(ms / 1000).toFixed(1)}s)`; v1.className = 'rec-verdict rv-ok'; }
+        const v2 = $('f-rt-verdict');
+        if (v2) { v2.textContent = `⏳ SAFETY TAIL…`; v2.className = 'rv-ok'; }
+      }
+    });
   } catch (e) {
     State.recording = false;
     seg.status = seg.prevStatus || 'empty';

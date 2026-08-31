@@ -39,6 +39,7 @@ Upload Video → Separate Audio (VOICE_STEM + MUSIC_STEM) → Analyze Original D
 ### Recording workflow
 - Record **directly into the selected segment** (never a global track)
 - **Pre-record countdown (safety time)**: every RECORD starts with a fullscreen 3-2-1 countdown (cancellable with Esc) so the actor can get ready
+- **Post-record SAFETY TAIL (end-clipping protection)**: pressing STOP does **not** cut the capture immediately — the microphone keeps rolling for an extra **800 ms safety period** (the UI shows `⏳ SAFETY TAIL…`) so the decay of the last word and the encoder's final frames are never destroyed. The auto-trim additionally keeps **+200 ms tail / +50 ms head padding** around the detected speech, while timing verdicts are still judged on the real (unpadded) speech duration
 - **Multi-Take sessions** (MULTI button / `M`): record several consecutive takes in one hands-free session — RECORD/M ends the take and rolls the next one after a short countdown, FINISH ends the session. Each take is **auto-trimmed** (leading/trailing silence removed) and the **AI evaluates all session takes** (timing fit 45% + clarity/SNR 30% + cleanliness 25%) and pre-selects the single best performance (⭐ AI BEST badge); ACCEPT uses it by default — final acceptance stays explicit
 - **Fixed recording DSP chain** (`js/dsp-chain.js`) applied automatically to every take right after capture, before analysis:
   1. Overall gain **−9 dB**
