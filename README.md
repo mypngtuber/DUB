@@ -18,7 +18,8 @@ Upload Video → Separate Audio (VOICE_STEM + MUSIC_STEM) → Analyze Original D
 - **VOICE_STEM speech analysis** (VAD): actual speech start/end, duration, silence before/after, SRT-timing validation flag per line
 
 ### The Dubbing Timeline (the only visible timeline)
-- Built **before recording** — **one segment per dialogue line**, each with Line ID, Character, Text, Start, End, Target Duration, Status, Takes, Accepted Take
+- Built **before recording** — one segment per dialogue line by default, with Line ID, Character, Text, Start, End, Target Duration, Status, Takes, Accepted Take
+- **Merge linked SRT lines**: select two or more consecutive, unrecorded lines for the same character and merge them into one performance window. The merged duration spans the first start through the last end, preserving pauses between cues; source line IDs remain stored
 - Segment width ∝ duration, gaps visible, ruler + zoom, playhead synced to video, current-segment highlight, per-status colors, accepted-take waveform drawn inside its exact segment
 - No original-voice / music / SFX timelines — original voice via **🎤 Listen** button (auto-ducks music); background music is the **separated MUSIC_STEM** played at segment time with **AI Auto-Mix** (no manual volume UI)
 
@@ -37,7 +38,7 @@ Upload Video → Separate Audio (VOICE_STEM + MUSIC_STEM) → Analyze Original D
 - Enhanced/fitted renders are metadata-only (buffers aren't serializable) — flags reset on open; re-run AI Auto Enhance / Fit per take when needed
 
 ### Recording workflow
-- Record **directly into the selected segment** (never a global track)
+- Record directly into the selected segment, or switch to the optional **Open Recording** full-clip workflow
 - **Pre-record countdown (safety time)**: every RECORD starts with a fullscreen 3-2-1 countdown (cancellable with Esc) so the actor can get ready
 - **Post-record SAFETY TAIL (end-clipping protection)**: pressing STOP does **not** cut the capture immediately — the microphone keeps rolling for an extra **800 ms safety period** (the UI shows `⏳ SAFETY TAIL…`) so the decay of the last word and the encoder's final frames are never destroyed. The auto-trim additionally keeps **+200 ms tail / +50 ms head padding** around the detected speech, while timing verdicts are still judged on the real (unpadded) speech duration
 - **Multi-Take sessions** (MULTI button / `M`): record several consecutive takes in one hands-free session — RECORD/M ends the take and rolls the next one after a short countdown, FINISH ends the session. Each take is **auto-trimmed** (leading/trailing silence removed) and the **AI evaluates all session takes** (timing fit 45% + clarity/SNR 30% + cleanliness 25%) and pre-selects the single best performance (⭐ AI BEST badge); ACCEPT uses it by default — final acceptance stays explicit
@@ -53,6 +54,13 @@ Upload Video → Separate Audio (VOICE_STEM + MUSIC_STEM) → Analyze Original D
 - Deterministic take analysis: trimmed speech duration, clipping, leading/trailing silence, internal gaps, completeness heuristics
 - **Fit Audio to Target**: optional gentle time-stretch (≤12% — beyond that it recommends retake/AI rewrite)
 - **✓ ACCEPT TAKE** is always explicit — accepted audio placed at the segment's exact start/end (authoritative)
+
+### Open Recording — one editable track for the full clip
+- A single project-length track lets the actor perform the entire clip continuously while the current SRT text, character, next line and cue progress remain synchronized with the video
+- Start or continue recording from any playhead position; recording overwrites only the newly captured range and preserves the rest of the full take
+- Drag directly on the waveform to select a range, set precise IN/OUT points, delete a range without shifting video sync, re-record only the selection, clear the track, or undo recent edits
+- Preview the full recording with the muted video and choose **Open recording track** as the voice source during audio/video export
+- Open-track audio and edit history metadata are included in `.dubproj.zip` project bundles
 
 ### ✨ AI-Powered Professional Audio Enhancement (fully automatic)
 - **AI Auto Enhance** button on every take (+ optional auto-enhance of every new take, toggle in Settings)
@@ -103,7 +111,7 @@ No URL parameters; all state is in-memory per session (media files are never upl
 |---|---|
 | `js/parsers.js` | Deterministic SRT/Script parsing, matching, segment building |
 | `js/audio-engine.js` | Audio extraction, 2-stem separation, VAD, reference playback/ducking |
-| `js/recorder.js` | Per-segment mic recording, take analysis, preview, time-fit |
+| `js/recorder.js` | Per-segment mic recording, full-clip track editing, take analysis, preview, time-fit |
 | `js/enhancer.js` | ✨ AI Auto Enhance: analyze → decide → process chain |
 | `js/gemini.js` | Gemini API: settings, ambiguous matching, timed rewrites |
 | `js/timeline.js` | Dubbing Timeline rendering, playhead, waveforms |
@@ -112,7 +120,7 @@ No URL parameters; all state is in-memory per session (media files are never upl
 | `js/project-store.js` | 💾 Save/Open `.dubproj.zip` bundles (JSZip): manifest + video + take blobs |
 | `js/app.js` | State, workflow, UI wiring, navigation, users, settings, export UI, full-project preview, project restore |
 
-**Data model** — segment: `id, lineNumber, character, text/activeText, startTime, endTime, targetDuration, originalSpeechStart/End, status, takes[], acceptedTakeId, aiSuggestions[]`; take: `id, segmentId, blob, buffer, duration, trimStart/End, analysis, status, enhancedBuffer?, enhanceReport?, fittedBuffer?, createdAt`.
+**Data model** — segment: `id, lineNumber, sourceLineNumbers[], character, text/activeText, startTime, endTime, targetDuration, originalSpeechStart/End, status, takes[], acceptedTakeId, aiSuggestions[]`; optional open recording: `buffer, hasAudio, duration, edits[]`; take: `id, segmentId, blob, buffer, duration, trimStart/End, analysis, status, enhancedBuffer?, enhanceReport?, fittedBuffer?, createdAt`.
 
 Segment states: `EMPTY · RECORDING · PROCESSING · NEEDS REVIEW · TIMING MISMATCH · RETAKE · ACCEPTED`.
 

@@ -20,7 +20,7 @@
 
 const ProjectStore = (() => {
 
-  const FORMAT_VERSION = 1;
+  const FORMAT_VERSION = 2;
 
   /* ── SAVE ──────────────────────────────────────────── */
 
@@ -36,6 +36,8 @@ const ProjectStore = (() => {
     // serializable segment/take metadata (buffers stay out; blobs go to files)
     const segments = p.segments.map(s => ({
       id: s.id, lineNumber: s.lineNumber, character: s.character,
+      sourceLineNumbers: s.sourceLineNumbers || [s.lineNumber],
+      sourceSegmentIds: s.sourceSegmentIds || [s.id],
       text: s.text, activeText: s.activeText,
       startTime: s.startTime, endTime: s.endTime, targetDuration: s.targetDuration,
       originalSpeechStart: s.originalSpeechStart, originalSpeechEnd: s.originalSpeechEnd,
@@ -69,6 +71,11 @@ const ProjectStore = (() => {
       userMode: state.userMode, assignments: state.assignments,
       activeUser: state.activeUser, ownerView: state.ownerView,
       srtErrors: p.srtErrors || [], scriptErrors: p.scriptErrors || [],
+      openRecording: p.openRecording && p.openRecording.hasAudio && p.openRecording.buffer ? {
+        hasAudio: true,
+        file: 'audio/open-recording.wav',
+        edits: p.openRecording.edits || []
+      } : { hasAudio: false, edits: p.openRecording?.edits || [] },
       segments
     };
     zip.file('project.json', JSON.stringify(manifest, null, 1));
@@ -80,6 +87,10 @@ const ProjectStore = (() => {
     prog(0.15, 'Packing video…');
     if (!p.videoFile) throw new Error('The original video file is not available in memory — cannot bundle it.');
     zip.file(manifest.videoFile, p.videoFile);
+    if (manifest.openRecording.hasAudio) {
+      prog(0.18, 'Packing open recording track…');
+      zip.file(manifest.openRecording.file, audioBufferToWav(p.openRecording.buffer));
+    }
 
     // every recorded take (original capture blob = smallest faithful source)
     let done = 0;
@@ -172,8 +183,37 @@ const ProjectStore = (() => {
       done++;
       prog(0.2 + 0.7 * (done / Math.max(1, takeMetas.length)), `Extracting takes… ${done}/${takeMetas.length}`);
     }
+    if (manifest.openRecording && manifest.openRecording.hasAudio && manifest.openRecording.file) {
+      const openEntry = zip.file(manifest.openRecording.file);
+      if (openEntry) takeBlobs.set('__open_recording__', await openEntry.async('blob'));
+    }
     prog(1, 'Done');
     return { manifest, videoFile, takeBlobs };
+  }
+
+  function audioBufferToWav(buffer) {
+    const channels = buffer.numberOfChannels;
+    const sampleRate = buffer.sampleRate;
+    const frames = buffer.length;
+    const bytesPerSample = 2;
+    const out = new ArrayBuffer(44 + frames * channels * bytesPerSample);
+    const view = new DataView(out);
+    const write = (offset, text) => { for (let i = 0; i < text.length; i++) view.setUint8(offset + i, text.charCodeAt(i)); };
+    write(0, 'RIFF'); view.setUint32(4, 36 + frames * channels * bytesPerSample, true); write(8, 'WAVE');
+    write(12, 'fmt '); view.setUint32(16, 16, true); view.setUint16(20, 1, true);
+    view.setUint16(22, channels, true); view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * channels * bytesPerSample, true);
+    view.setUint16(32, channels * bytesPerSample, true); view.setUint16(34, 16, true);
+    write(36, 'data'); view.setUint32(40, frames * channels * bytesPerSample, true);
+    let offset = 44;
+    for (let i = 0; i < frames; i++) {
+      for (let c = 0; c < channels; c++) {
+        const sample = Math.max(-1, Math.min(1, buffer.getChannelData(c)[i]));
+        view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
+        offset += 2;
+      }
+    }
+    return new Blob([out], { type: 'audio/wav' });
   }
 
   function mimeFromExt(path) {

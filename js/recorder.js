@@ -396,9 +396,63 @@ const Recorder = (() => {
     return best && best.aiScore.total > 0 ? best : null;
   }
 
+  /* ── OPEN RECORDING TRACK EDITING ─────────────────────
+     A project-length AudioBuffer is used as a non-destructive timeline.
+     Recording from a cursor overwrites only the captured range; deleting a
+     selection writes silence without changing project/video duration. */
+
+  function createOpenTrack(duration, sampleRate) {
+    const ac = AudioEngine.getCtx();
+    const sr = sampleRate || ac.sampleRate || 48000;
+    return ac.createBuffer(1, Math.max(1, Math.ceil(duration * sr)), sr);
+  }
+
+  function overwriteTrack(track, source, atSeconds, sourceStart = 0, duration = null) {
+    if (!track || !source) throw new Error('Audio track data is missing.');
+    const at = Math.max(0, Math.min(track.duration, atSeconds || 0));
+    const srcStart = Math.max(0, Math.min(source.duration, sourceStart || 0));
+    const copyDuration = Math.max(0, Math.min(
+      duration == null ? source.duration - srcStart : duration,
+      track.duration - at,
+      source.duration - srcStart
+    ));
+    const out = cloneBuffer(track);
+    const dst = out.getChannelData(0);
+    const src = source.getChannelData(0);
+    const dstStart = Math.floor(at * out.sampleRate);
+    const frames = Math.floor(copyDuration * out.sampleRate);
+    const ratio = source.sampleRate / out.sampleRate;
+    const srcBase = srcStart * source.sampleRate;
+    for (let i = 0; i < frames && dstStart + i < dst.length; i++) {
+      const pos = srcBase + i * ratio;
+      const p0 = Math.floor(pos), p1 = Math.min(src.length - 1, p0 + 1);
+      const frac = pos - p0;
+      dst[dstStart + i] = (src[p0] || 0) * (1 - frac) + (src[p1] || 0) * frac;
+    }
+    return out;
+  }
+
+  function silenceTrackRange(track, fromSeconds, toSeconds) {
+    if (!track) throw new Error('No open recording exists yet.');
+    const from = Math.max(0, Math.min(track.duration, Math.min(fromSeconds, toSeconds)));
+    const to = Math.max(from, Math.min(track.duration, Math.max(fromSeconds, toSeconds)));
+    if (to - from < 0.01) throw new Error('Select an audio range before deleting.');
+    const out = cloneBuffer(track);
+    const data = out.getChannelData(0);
+    data.fill(0, Math.floor(from * out.sampleRate), Math.ceil(to * out.sampleRate));
+    return out;
+  }
+
+  function cloneBuffer(buffer) {
+    const ac = AudioEngine.getCtx();
+    const out = ac.createBuffer(buffer.numberOfChannels, buffer.length, buffer.sampleRate);
+    for (let c = 0; c < buffer.numberOfChannels; c++) out.copyToChannel(buffer.getChannelData(c), c);
+    return out;
+  }
+
   function releaseMic() {
     if (mediaStream) { mediaStream.getTracks().forEach(t => t.stop()); mediaStream = null; }
   }
 
-  return { ensureMic, start, stop, isRecording, playTake, playTakeRaw, stopTake, canFit, fitToTarget, releaseMic, analyzeTakeBuffer, scoreTake, selectBestTake, SAFETY_TAIL_MS };
+  return { ensureMic, start, stop, isRecording, playTake, playTakeRaw, stopTake, canFit, fitToTarget, releaseMic, analyzeTakeBuffer, scoreTake, selectBestTake, createOpenTrack, overwriteTrack, silenceTrackRange, cloneBuffer, SAFETY_TAIL_MS };
 })();

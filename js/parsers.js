@@ -239,6 +239,8 @@ const Parsers = (() => {
       return {
         id: 'seg-' + String(cue.lineNumber).padStart(3, '0') + '-' + i,
         lineNumber: cue.lineNumber,
+        sourceLineNumbers: [cue.lineNumber],
+        sourceSegmentIds: ['seg-' + String(cue.lineNumber).padStart(3, '0') + '-' + i],
         character: m.character,
         text: cue.text,
         startTime: cue.start,
@@ -258,5 +260,55 @@ const Parsers = (() => {
     });
   }
 
-  return { parseSRT, parseScript, matchCuesToScript, buildSegments, secondsToClock, srtTimeToSeconds, similarity, normalizeCharName };
+  /**
+   * Merge two or more adjacent subtitle segments into one recording unit.
+   * Timing remains authoritative: the merged window spans from the first cue
+   * start to the last cue end, including any intentional pause between cues.
+   * Existing takes are deliberately rejected so audio is never lost silently.
+   */
+  function mergeSegments(allSegments, ids) {
+    const wanted = new Set(ids || []);
+    const picked = allSegments.filter(s => wanted.has(s.id)).sort((a, b) => a.startTime - b.startTime);
+    if (picked.length < 2) throw new Error('Select at least two dialogue lines to merge.');
+    if (picked.some(s => (s.takes && s.takes.length) || s.acceptedTakeId)) {
+      throw new Error('Lines with recorded takes cannot be merged. Delete their takes first so no audio is lost.');
+    }
+    const firstIndex = allSegments.indexOf(picked[0]);
+    const indexes = picked.map(s => allSegments.indexOf(s));
+    if (indexes.some((v, i) => i && v !== indexes[i - 1] + 1)) {
+      throw new Error('Only consecutive dialogue lines can be merged.');
+    }
+    const characters = [...new Set(picked.map(s => s.character))];
+    if (characters.length !== 1) throw new Error('Merged lines must belong to the same character.');
+
+    const first = picked[0], last = picked[picked.length - 1];
+    const sourceLineNumbers = picked.flatMap(s => s.sourceLineNumbers || [s.lineNumber]);
+    const merged = {
+      ...first,
+      id: `seg-merged-${Date.now()}-${Math.floor(Math.random() * 10000)}`,
+      lineNumber: sourceLineNumbers[0],
+      sourceLineNumbers,
+      sourceSegmentIds: picked.flatMap(s => s.sourceSegmentIds || [s.id]),
+      text: picked.map(s => s.text).join('\n'),
+      activeText: picked.map(s => s.activeText || s.text).join('\n'),
+      startTime: first.startTime,
+      endTime: last.endTime,
+      targetDuration: +(last.endTime - first.startTime).toFixed(3),
+      originalSpeechStart: first.originalSpeechStart,
+      originalSpeechEnd: last.originalSpeechEnd,
+      speechAnalysis: null,
+      srtTimingOk: picked.every(s => s.srtTimingOk !== false),
+      status: picked.some(s => s.needsCharacterReview) ? 'needs_review' : 'empty',
+      needsCharacterReview: picked.some(s => s.needsCharacterReview),
+      takes: [],
+      acceptedTakeId: null,
+      aiBestTakeId: null,
+      aiSuggestions: []
+    };
+    const next = [...allSegments];
+    next.splice(firstIndex, picked.length, merged);
+    return { segments: next, merged, removed: picked };
+  }
+
+  return { parseSRT, parseScript, matchCuesToScript, buildSegments, mergeSegments, secondsToClock, srtTimeToSeconds, similarity, normalizeCharName };
 })();
