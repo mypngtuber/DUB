@@ -443,6 +443,53 @@ const Recorder = (() => {
     return out;
   }
 
+  function moveTrackRange(track, fromSeconds, toSeconds, atSeconds) {
+    if (!track) throw new Error('No open recording exists yet.');
+    const from = Math.max(0, Math.min(track.duration, Math.min(fromSeconds, toSeconds)));
+    const to = Math.max(from, Math.min(track.duration, Math.max(fromSeconds, toSeconds)));
+    const duration = to - from;
+    const at = Math.max(0, Math.min(track.duration - duration, atSeconds));
+    if (duration < 0.01) return cloneBuffer(track);
+    const out = cloneBuffer(track);
+    const sr = track.sampleRate;
+    const src = track.getChannelData(0).slice(Math.floor(from * sr), Math.ceil(to * sr));
+    const dst = out.getChannelData(0);
+    dst.fill(0, Math.floor(from * sr), Math.ceil(to * sr));
+    dst.set(src.subarray(0, Math.max(0, dst.length - Math.floor(at * sr))), Math.floor(at * sr));
+    return out;
+  }
+
+  // Energy-based speech segmentation used by "Save recording". Short gaps are
+  // bridged so words remain together; head/tail padding protects consonants.
+  function detectSpeechRegions(buffer, { thresholdRatio = 0.09, minSpeech = 0.16, maxGap = 0.32 } = {}) {
+    if (!buffer) return [];
+    const data = buffer.getChannelData(0), sr = buffer.sampleRate, win = Math.max(1, Math.round(sr * 0.02));
+    const energy = [];
+    for (let i = 0; i < data.length; i += win) {
+      let sum = 0, end = Math.min(data.length, i + win);
+      for (let j = i; j < end; j++) sum += data[j] * data[j];
+      energy.push(Math.sqrt(sum / Math.max(1, end - i)));
+    }
+    const sorted = [...energy].sort((a, b) => a - b);
+    const noise = sorted[Math.floor(sorted.length * 0.2)] || 0;
+    const peak = sorted[sorted.length - 1] || 0;
+    const threshold = Math.max(0.004, noise * 2.8, peak * thresholdRatio);
+    const regions = [];
+    let start = -1, lastVoice = -1;
+    const gapFrames = Math.ceil(maxGap / (win / sr));
+    for (let i = 0; i <= energy.length; i++) {
+      const voiced = i < energy.length && energy[i] >= threshold;
+      if (voiced) { if (start < 0) start = i; lastVoice = i; }
+      if (start >= 0 && (!voiced && i - lastVoice > gapFrames || i === energy.length)) {
+        const a = Math.max(0, start * win / sr - HEAD_PAD_SEC);
+        const b = Math.min(buffer.duration, (lastVoice + 1) * win / sr + TAIL_PAD_SEC);
+        if (b - a >= minSpeech) regions.push({ start: +a.toFixed(3), end: +b.toFixed(3) });
+        start = -1; lastVoice = -1;
+      }
+    }
+    return regions;
+  }
+
   function cloneBuffer(buffer) {
     const ac = AudioEngine.getCtx();
     const out = ac.createBuffer(buffer.numberOfChannels, buffer.length, buffer.sampleRate);
@@ -454,5 +501,5 @@ const Recorder = (() => {
     if (mediaStream) { mediaStream.getTracks().forEach(t => t.stop()); mediaStream = null; }
   }
 
-  return { ensureMic, start, stop, isRecording, playTake, playTakeRaw, stopTake, canFit, fitToTarget, releaseMic, analyzeTakeBuffer, scoreTake, selectBestTake, createOpenTrack, overwriteTrack, silenceTrackRange, cloneBuffer, SAFETY_TAIL_MS };
+  return { ensureMic, start, stop, isRecording, playTake, playTakeRaw, stopTake, canFit, fitToTarget, releaseMic, analyzeTakeBuffer, scoreTake, selectBestTake, createOpenTrack, overwriteTrack, silenceTrackRange, moveTrackRange, detectSpeechRegions, cloneBuffer, SAFETY_TAIL_MS };
 })();

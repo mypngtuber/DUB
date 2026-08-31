@@ -108,6 +108,7 @@
       <div class="panel-title" id="queue-title"><i class="fa-solid fa-list-ol"></i> DIALOGUE QUEUE</div>
       <div class="queue-tools">
         <button id="btn-merge-mode" title="Select consecutive SRT lines and record them as one performance"><i class="fa-solid fa-link"></i> Merge lines</button>
+        <button id="btn-unmerge-current" title="Separate the selected merged performance back into its original lines" style="display:none"><i class="fa-solid fa-link-slash"></i> Unmerge</button>
         <button id="btn-merge-selected" class="merge-confirm" style="display:none"><i class="fa-solid fa-check"></i> Merge selected</button>
         <button id="btn-merge-cancel" style="display:none"><i class="fa-solid fa-xmark"></i></button>
       </div>
@@ -288,12 +289,15 @@
         <button id="open-play-video" class="btn-ghost"><i class="fa-solid fa-play"></i> Play video</button>
         <button id="open-play-track" class="btn-ghost"><i class="fa-solid fa-headphones"></i> Play recording</button>
         <button id="open-record" class="btn-primary open-record-btn"><i class="fa-solid fa-circle"></i> Record from cursor</button>
+        <button id="open-listening-mode" class="btn-ghost" title="Keep the microphone armed; capture starts on speech and stops after silence"><i class="fa-solid fa-ear-listen"></i> Listening mode</button>
         <button id="open-stop" class="btn-ghost" disabled><i class="fa-solid fa-stop"></i> Stop</button>
+        <button id="open-save-track" class="btn-primary" title="Save the master track and automatically detect/slice speech clips"><i class="fa-solid fa-floppy-disk"></i> Save recording</button>
       </div>
       <input id="open-seek" class="open-seek" type="range" min="0" max="1000" value="0">
       <div class="open-wave-editor">
-        <canvas id="open-wave-canvas" height="120" aria-label="Open recording waveform editor"></canvas>
-        <div class="open-wave-help">Drag on the waveform to select audio · click to move the recording cursor</div>
+        <canvas id="open-wave-canvas" height="150" aria-label="Open recording waveform editor"></canvas>
+        <div id="open-clip-layer" class="open-clip-layer" aria-label="Editable audio clips"></div>
+        <div class="open-wave-help">Premiere-style timeline: drag a clip to move it · drag its edges to trim · click to select · red line is the split point</div>
       </div>
       <div class="open-edit-grid">
         <label>Selection start <input id="open-sel-start" type="number" min="0" step="0.01" value="0"></label>
@@ -302,10 +306,12 @@
         <button id="open-set-out" class="btn-ghost"><i class="fa-solid fa-i-cursor"></i> Set OUT at cursor</button>
         <button id="open-delete-selection" class="btn-ghost open-danger"><i class="fa-solid fa-trash"></i> Delete selected audio</button>
         <button id="open-record-selection" class="btn-ghost"><i class="fa-solid fa-microphone-lines"></i> Re-record selection</button>
-        <button id="open-undo" class="btn-ghost" disabled><i class="fa-solid fa-rotate-left"></i> Undo edit</button>
+        <button id="open-split" class="btn-ghost"><i class="fa-solid fa-scissors"></i> Split at cursor</button>
+        <button id="open-trim-selection" class="btn-ghost"><i class="fa-solid fa-crop-simple"></i> Trim clip to selection</button>
+        <button id="open-undo" class="btn-ghost" disabled><i class="fa-solid fa-rotate-left"></i> Undo (Ctrl+Z)</button>
         <button id="open-clear" class="btn-ghost open-danger"><i class="fa-solid fa-eraser"></i> Clear track</button>
       </div>
-      <div id="open-rec-status" class="settings-status">One project-length track. Recording from the cursor replaces only that range; the rest remains untouched.</div>
+      <div id="open-rec-status" class="settings-status">Recordings stay as separate editable clips. Save recording analyzes speech and aligns the clips without overlap.</div>
     </div>
   </div>
 </div>

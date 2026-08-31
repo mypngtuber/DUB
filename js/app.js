@@ -323,6 +323,19 @@ function initMergeControls() {
     toast('Select two or more consecutive lines for the same character, then press Merge selected.', 'info', 6000);
   });
   $('btn-merge-cancel').addEventListener('click', exitMergeMode);
+  $('btn-unmerge-current').addEventListener('click', () => {
+    const seg = currentSegment();
+    if (!seg) return;
+    try {
+      const result = Parsers.unmergeSegment(State.project.segments, seg.id);
+      State.project.segments = result.segments;
+      State.project.characters = buildCharacterIndex(result.segments);
+      Timeline.setData(result.segments, State.project.duration);
+      renderCharacters(); renderQueue(); renderProgress();
+      selectSegment(result.restored[0].id);
+      toast(`Separated the merged performance back into ${result.restored.length} editable lines.`, 'ok');
+    } catch (e) { toast(e.message, 'error', 6500); }
+  });
   $('btn-merge-selected').addEventListener('click', () => {
     try {
       const result = Parsers.mergeSegments(State.project.segments, [...State.mergeSelection]);
@@ -385,6 +398,7 @@ function selectSegment(id) {
   State.currentSegmentId = id;
   const seg = getSegment(id);
   if (!seg) return;
+  $('btn-unmerge-current').style.display = seg.mergedSources && seg.mergedSources.length > 1 ? '' : 'none';
 
   // video follows the segment
   const video = $('video-player');
@@ -550,7 +564,11 @@ function toggleFullPreview() {
       const src = ac.createBufferSource();
       src.buffer = eff.buffer;
       src.connect(ac.destination);
-      src.start(t0 + seg.startTime, eff.start, Math.min(eff.duration, seg.targetDuration + 0.4));
+      const ordered = [...accepted].sort((a, b) => a.startTime - b.startTime);
+      const index = ordered.findIndex(s => s.id === seg.id);
+      const next = ordered[index + 1];
+      const untilNext = next ? Math.max(0.01, next.startTime - seg.startTime) : eff.duration;
+      src.start(t0 + seg.startTime, eff.start, Math.min(eff.duration, seg.targetDuration, untilNext));
       FullPreview.sources.push(src);
     }
     const watch = () => {
@@ -1245,6 +1263,12 @@ function initTransport() {
   document.addEventListener('keydown', e => {
     if (!State.project) return;
     const tag = document.activeElement && document.activeElement.tagName;
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
+      if ($('modal-open-recording').style.display !== 'none' && !OpenRec.recording) {
+        e.preventDefault(); undoOpenEdit();
+      }
+      return;
+    }
     if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
     switch (e.key) {
       case ' ': e.preventDefault(); if (!State.recording) togglePlay(); break;
@@ -1292,16 +1316,22 @@ function updateFocusView() {
 
 /* ═══════════════ OPEN RECORDING — FULL CLIP ═══════════════ */
 
-const OpenRec = { recording: false, stopping: false, cursor: 0, recordStart: 0, selection: [0, 0], replaceEnd: null, playSource: null, history: [], dragStart: null };
+const OpenRec = {
+  recording: false, stopping: false, cursor: 0, recordStart: 0,
+  selection: [0, 0], replaceEnd: null, playSource: null, history: [], dragStart: null,
+  selectedClipId: null, clipDrag: null, listeningMode: false, voiceStarted: false,
+  voiceFrames: 0, silenceMs: 0
+};
 
 function createOpenRecordingState(duration) {
-  return { buffer: null, hasAudio: false, duration, edits: [] };
+  return { buffer: null, hasAudio: false, duration, edits: [], clips: [], saved: false };
 }
 
 function resetOpenRecordingSession() {
   stopOpenPlayback();
   OpenRec.recording = false; OpenRec.stopping = false; OpenRec.cursor = 0; OpenRec.recordStart = 0;
   OpenRec.selection = [0, 0]; OpenRec.replaceEnd = null; OpenRec.history = [];
+  OpenRec.selectedClipId = null; OpenRec.clipDrag = null; OpenRec.voiceStarted = false; OpenRec.silenceMs = 0;
 }
 
 function openRecordingEditor() {
@@ -1335,6 +1365,8 @@ function initOpenRecording() {
   $('open-to-start').addEventListener('click', () => setOpenCursor(0));
   $('open-play-track').addEventListener('click', playOpenTrack);
   $('open-record').addEventListener('click', () => startOpenRecording(false));
+  $('open-listening-mode').addEventListener('click', toggleListeningMode);
+  $('open-save-track').addEventListener('click', saveOpenRecordingTrack);
   $('open-record-selection').addEventListener('click', () => startOpenRecording(true));
   $('open-stop').addEventListener('click', () => OpenRec.recording ? stopOpenRecording() : stopOpenPlayback());
   $('open-set-in').addEventListener('click', () => setOpenSelection(OpenRec.cursor, OpenRec.selection[1]));
@@ -1342,6 +1374,8 @@ function initOpenRecording() {
   $('open-sel-start').addEventListener('change', readOpenSelectionInputs);
   $('open-sel-end').addEventListener('change', readOpenSelectionInputs);
   $('open-delete-selection').addEventListener('click', deleteOpenSelection);
+  $('open-split').addEventListener('click', splitOpenClip);
+  $('open-trim-selection').addEventListener('click', trimOpenClipToSelection);
   $('open-clear').addEventListener('click', clearOpenTrack);
   $('open-undo').addEventListener('click', undoOpenEdit);
   bindOpenWaveSelection();
@@ -1401,15 +1435,20 @@ function updateOpenTransport() {
   $('open-record').innerHTML = recording ? '<i class="fa-solid fa-circle"></i> Recording…' : '<i class="fa-solid fa-circle"></i> Record from cursor';
   $('open-play-video').innerHTML = playing && !OpenRec.playSource ? '<i class="fa-solid fa-pause"></i> Pause video' : '<i class="fa-solid fa-play"></i> Play video';
   $('open-undo').disabled = !OpenRec.history.length;
+  $('open-listening-mode').classList.toggle('open-listening-active', OpenRec.listeningMode);
+  $('open-listening-mode').innerHTML = OpenRec.listeningMode
+    ? '<i class="fa-solid fa-ear-listen"></i> Listening: ON'
+    : '<i class="fa-solid fa-ear-listen"></i> Listening mode';
 }
 
 function ensureOpenBuffer() {
   const state = State.project.openRecording || (State.project.openRecording = createOpenRecordingState(State.project.duration));
   if (!state.buffer) state.buffer = Recorder.createOpenTrack(State.project.duration);
+  if (!Array.isArray(state.clips)) state.clips = [];
   return state;
 }
 
-async function startOpenRecording(selectionOnly) {
+async function startOpenRecording(selectionOnly, armedListening = false) {
   if (OpenRec.recording || State.recording) return;
   readOpenSelectionInputs();
   if (selectionOnly) {
@@ -1417,14 +1456,17 @@ async function startOpenRecording(selectionOnly) {
     if (b - a < 0.05) { toast('Select the part you want to re-record first.', 'warn'); return; }
     OpenRec.cursor = a; OpenRec.replaceEnd = b;
   } else OpenRec.replaceEnd = null;
-  const go = await runCountdown(3, selectionOnly ? 'RE-RECORD SELECTION…' : 'OPEN RECORDING…');
+  const go = armedListening ? true : await runCountdown(3, selectionOnly ? 'RE-RECORD SELECTION…' : 'OPEN RECORDING…');
   if (!go) return;
   try {
     await Recorder.ensureMic();
     stopOpenPlayback();
     const video = $('open-rec-video');
     video.currentTime = OpenRec.cursor;
-    OpenRec.recordStart = OpenRec.cursor;
+    OpenRec.recordStart = findNonOverlappingStart(OpenRec.cursor, 0.05);
+    OpenRec.voiceStarted = !armedListening;
+    OpenRec.voiceFrames = 0;
+    OpenRec.silenceMs = 0;
     video.muted = true;
     const pseudoSegment = { id: 'open-recording', targetDuration: Math.max(0.1, (OpenRec.replaceEnd || State.project.duration) - OpenRec.cursor) };
     OpenRec.recording = true;
@@ -1432,14 +1474,32 @@ async function startOpenRecording(selectionOnly) {
     State.recording = true;
     updateOpenTransport();
     $('open-rec-status').className = 'settings-status err';
-    $('open-rec-status').textContent = `● Recording from ${Parsers.secondsToClock(OpenRec.cursor)} — press Stop at any time.`;
+    $('open-rec-status').textContent = armedListening
+      ? 'Listening… speak naturally. Capture starts with your voice and stops after 0.9s of silence.'
+      : `● Recording from ${Parsers.secondsToClock(OpenRec.recordStart)} — press Stop at any time.`;
     await Recorder.start(pseudoSegment, {
       onTick: elapsed => {
         const end = OpenRec.replaceEnd || State.project.duration;
-        if (OpenRec.recordStart + elapsed >= end && !OpenRec.stopping) stopOpenRecording();
+        if (OpenRec.voiceStarted && OpenRec.recordStart + elapsed >= end && !OpenRec.stopping) stopOpenRecording();
+      },
+      onLevel: level => {
+        if (!armedListening) return;
+        if (!OpenRec.voiceStarted) {
+          OpenRec.voiceFrames = level > 0.035 ? OpenRec.voiceFrames + 1 : 0;
+          if (OpenRec.voiceFrames >= 3) {
+            OpenRec.voiceStarted = true;
+            OpenRec.recordStart = findNonOverlappingStart(OpenRec.cursor, 0.05);
+            video.currentTime = OpenRec.recordStart;
+            video.play().catch(() => {});
+            $('open-rec-status').textContent = '● Voice detected — recording this sentence…';
+          }
+        } else {
+          OpenRec.silenceMs = level < 0.018 ? OpenRec.silenceMs + 16.7 : 0;
+          if (OpenRec.silenceMs >= 900 && !OpenRec.stopping) stopOpenRecording();
+        }
       }
     });
-    await video.play();
+    if (!armedListening) await video.play();
   } catch (e) {
     if (Recorder.isRecording()) {
       try { await Recorder.stop({ id: 'open-recording', targetDuration: 1 }, { safetyTailMs: 0 }); } catch (_) {}
@@ -1461,26 +1521,45 @@ async function stopOpenRecording() {
     const state = ensureOpenBuffer();
     pushOpenHistory();
     let base = state.buffer;
-    if (OpenRec.replaceEnd != null) base = Recorder.silenceTrackRange(base, insertAt, OpenRec.replaceEnd);
+    if (OpenRec.replaceEnd != null) {
+      base = Recorder.silenceTrackRange(base, insertAt, OpenRec.replaceEnd);
+      state.clips = state.clips.filter(c => c.end <= insertAt || c.start >= OpenRec.replaceEnd);
+    }
+    const speechStart = take.trimStart || 0;
+    const speechDuration = Math.max(0, (take.trimEnd || 0) - speechStart);
+    if (take.analysis?.verdict === 'silent' || speechDuration < 0.03) {
+      $('open-rec-status').className = 'settings-status';
+      $('open-rec-status').textContent = OpenRec.listeningMode ? 'No speech captured. Listening again…' : 'No clear speech was captured.';
+      return;
+    }
     const maxDuration = (OpenRec.replaceEnd || State.project.duration) - insertAt;
-    state.buffer = Recorder.overwriteTrack(base, take.buffer, insertAt, 0, Math.min(take.buffer.duration, maxDuration));
-    state.hasAudio = true;
-    state.edits.push({ type: OpenRec.replaceEnd != null ? 'rerecord' : 'record', at: insertAt, end: +(insertAt + Math.min(take.buffer.duration, maxDuration)).toFixed(3), createdAt: Date.now() });
-    OpenRec.cursor = Math.min(State.project.duration, insertAt + Math.min(take.buffer.duration, maxDuration));
+    const placedDuration = Math.min(speechDuration, maxDuration);
+    const safeAt = findNonOverlappingStart(insertAt, placedDuration);
+    state.buffer = Recorder.overwriteTrack(base, take.buffer, safeAt, speechStart, placedDuration);
+    const clip = { id: `clip-${Date.now()}-${Math.floor(Math.random() * 10000)}`, start: safeAt, end: +(safeAt + placedDuration).toFixed(3), label: `Recording ${state.clips.length + 1}` };
+    state.clips.push(clip); state.clips.sort((a, b) => a.start - b.start);
+    OpenRec.selectedClipId = clip.id;
+    state.hasAudio = true; state.saved = false;
+    state.edits.push({ type: OpenRec.replaceEnd != null ? 'rerecord' : 'record', at: safeAt, end: clip.end, createdAt: Date.now() });
+    OpenRec.cursor = clip.end;
     video.currentTime = OpenRec.cursor;
     $('open-rec-status').className = 'settings-status ok';
     $('open-rec-status').textContent = `✓ Audio saved on the full-clip track. Continue from ${Parsers.secondsToClock(OpenRec.cursor)} or select any part to edit.`;
   } catch (e) {
     toast('Open recording failed: ' + e.message, 'error', 6500);
   } finally {
+    const keepListening = OpenRec.listeningMode;
     OpenRec.recording = false; OpenRec.stopping = false; OpenRec.replaceEnd = null; State.recording = false;
     updateOpenRecordingUI();
+    if (keepListening && OpenRec.cursor < State.project.duration - 0.1) {
+      setTimeout(() => startOpenRecording(false, true), 180);
+    }
   }
 }
 
 function pushOpenHistory() {
   const state = ensureOpenBuffer();
-  OpenRec.history.push({ buffer: Recorder.cloneBuffer(state.buffer), hasAudio: state.hasAudio, edits: [...state.edits] });
+  OpenRec.history.push({ buffer: Recorder.cloneBuffer(state.buffer), hasAudio: state.hasAudio, edits: [...state.edits], clips: state.clips.map(c => ({ ...c })), saved: !!state.saved });
   if (OpenRec.history.length > 8) OpenRec.history.shift();
 }
 
@@ -1489,6 +1568,7 @@ function undoOpenEdit() {
   if (!prev) return;
   const state = ensureOpenBuffer();
   state.buffer = prev.buffer; state.hasAudio = prev.hasAudio; state.edits = prev.edits;
+  state.clips = prev.clips || []; state.saved = !!prev.saved; OpenRec.selectedClipId = null;
   $('open-rec-status').className = 'settings-status ok';
   $('open-rec-status').textContent = '✓ Last open-track edit was undone.';
   updateOpenRecordingUI();
@@ -1512,6 +1592,8 @@ function deleteOpenSelection() {
     if (b - a < 0.01) throw new Error('Select an audio range before deleting.');
     pushOpenHistory();
     state.buffer = Recorder.silenceTrackRange(state.buffer, a, b);
+    state.clips = state.clips.flatMap(c => subtractClipRange(c, a, b));
+    state.saved = false;
     state.edits.push({ type: 'delete', at: a, end: b, createdAt: Date.now() });
     OpenRec.cursor = a; $('open-rec-video').currentTime = a;
     $('open-rec-status').className = 'settings-status ok';
@@ -1524,8 +1606,105 @@ function clearOpenTrack() {
   if (state.hasAudio && !confirm('Clear the entire open recording track? You can undo this once.')) return;
   pushOpenHistory();
   state.buffer = Recorder.createOpenTrack(State.project.duration, state.buffer.sampleRate);
-  state.hasAudio = false; state.edits.push({ type: 'clear', createdAt: Date.now() });
+  state.hasAudio = false; state.clips = []; state.saved = false; OpenRec.selectedClipId = null;
+  state.edits.push({ type: 'clear', createdAt: Date.now() });
   updateOpenRecordingUI();
+}
+
+function toggleListeningMode() {
+  OpenRec.listeningMode = !OpenRec.listeningMode;
+  updateOpenTransport();
+  if (OpenRec.listeningMode) {
+    toast('Listening mode armed: recording starts on speech and closes the clip after silence.', 'ok', 5200);
+    if (!OpenRec.recording) startOpenRecording(false, true);
+  } else {
+    if (OpenRec.recording) stopOpenRecording();
+    $('open-rec-status').textContent = 'Listening mode stopped.';
+  }
+}
+
+function findNonOverlappingStart(requested, duration) {
+  const clips = [...(State.project.openRecording?.clips || [])].sort((a, b) => a.start - b.start);
+  let at = Math.max(0, requested || 0);
+  for (const clip of clips) {
+    if (at + duration <= clip.start) break;
+    if (at < clip.end && at + duration > clip.start) at = clip.end;
+  }
+  return Math.min(Math.max(0, State.project.duration - duration), at);
+}
+
+function subtractClipRange(clip, from, to) {
+  if (clip.end <= from || clip.start >= to) return [{ ...clip }];
+  const out = [];
+  if (clip.start < from - 0.01) out.push({ ...clip, id: clip.id + '-a', end: +from.toFixed(3) });
+  if (clip.end > to + 0.01) out.push({ ...clip, id: clip.id + '-b', start: +to.toFixed(3) });
+  return out;
+}
+
+function splitOpenClip() {
+  const state = ensureOpenBuffer();
+  const clip = state.clips.find(c => c.id === OpenRec.selectedClipId) || state.clips.find(c => OpenRec.cursor > c.start && OpenRec.cursor < c.end);
+  if (!clip || OpenRec.cursor <= clip.start + 0.03 || OpenRec.cursor >= clip.end - 0.03) {
+    toast('Select a clip and place the red cursor inside it before splitting.', 'warn'); return;
+  }
+  pushOpenHistory();
+  const index = state.clips.indexOf(clip), cut = +OpenRec.cursor.toFixed(3);
+  state.clips.splice(index, 1,
+    { ...clip, id: clip.id + '-L', end: cut, label: clip.label + ' A' },
+    { ...clip, id: clip.id + '-R', start: cut, label: clip.label + ' B' });
+  OpenRec.selectedClipId = clip.id + '-R'; state.saved = false;
+  state.edits.push({ type: 'split', at: cut, createdAt: Date.now() });
+  updateOpenRecordingUI();
+}
+
+function trimOpenClipToSelection() {
+  const state = ensureOpenBuffer(), clip = state.clips.find(c => c.id === OpenRec.selectedClipId);
+  const [a, b] = normalizedOpenSelection();
+  if (!clip || b - a < 0.02 || a < clip.start || b > clip.end) {
+    toast('Select one clip, then make a selection inside that clip to trim it.', 'warn'); return;
+  }
+  pushOpenHistory();
+  state.buffer = Recorder.silenceTrackRange(state.buffer, clip.start, a);
+  state.buffer = Recorder.silenceTrackRange(state.buffer, b, clip.end);
+  clip.start = +a.toFixed(3); clip.end = +b.toFixed(3); state.saved = false;
+  state.edits.push({ type: 'trim', at: clip.start, end: clip.end, createdAt: Date.now() });
+  updateOpenRecordingUI();
+}
+
+async function saveOpenRecordingTrack() {
+  const state = ensureOpenBuffer();
+  if (!state.hasAudio) { toast('Record some audio before saving the track.', 'warn'); return; }
+  const button = $('open-save-track'), old = button.innerHTML;
+  button.disabled = true; button.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> AI analyzing…';
+  try {
+    const regions = Recorder.detectSpeechRegions(state.buffer);
+    if (!regions.length) throw new Error('No clear speech was detected in the recording.');
+    pushOpenHistory();
+    const original = state.buffer;
+    let aligned = Recorder.createOpenTrack(State.project.duration, original.sampleRate);
+    const cues = State.project.segments;
+    const clips = [];
+    let previousEnd = 0, cueIndex = 0;
+    regions.forEach((region, i) => {
+      const duration = region.end - region.start;
+      while (cueIndex + 1 < cues.length && Math.abs(cues[cueIndex + 1].startTime - region.start) < Math.abs(cues[cueIndex].startTime - region.start)) cueIndex++;
+      const cue = cues[cueIndex] || null;
+      const desired = cue ? (cue.originalSpeechStart ?? cue.startTime) : region.start;
+      const at = Math.min(State.project.duration - duration, Math.max(previousEnd, desired));
+      aligned = Recorder.overwriteTrack(aligned, original, at, region.start, duration);
+      const end = +(at + duration).toFixed(3);
+      clips.push({ id: `clip-ai-${Date.now()}-${i}`, start: +at.toFixed(3), end, label: cue ? `#${cue.lineNumber} ${cue.character}` : `Speech ${i + 1}`, segmentId: cue?.id || null });
+      previousEnd = end;
+      if (cueIndex < cues.length - 1) cueIndex++;
+    });
+    state.buffer = aligned; state.clips = clips; state.hasAudio = true; state.saved = true;
+    state.edits.push({ type: 'ai-slice-save', clips: clips.length, createdAt: Date.now() });
+    OpenRec.selectedClipId = clips[0]?.id || null;
+    $('open-rec-status').className = 'settings-status ok';
+    $('open-rec-status').textContent = `✓ Saved as one master track. AI detected ${clips.length} speech clip(s), aligned them to dialogue timing, and prevented overlaps.`;
+    updateOpenRecordingUI();
+  } catch (e) { toast('Could not save recording: ' + e.message, 'error', 6500); }
+  finally { button.disabled = false; button.innerHTML = old; }
 }
 
 function playOpenTrack() {
@@ -1584,8 +1763,89 @@ function drawOpenWaveform() {
   }
   const [a, b] = normalizedOpenSelection(), duration = State.project.duration;
   if (b > a) { g.fillStyle = 'rgba(255,176,46,.22)'; g.fillRect(a / duration * w, 0, (b - a) / duration * w, h); }
+  renderOpenClips();
   const cursor = (($('open-rec-video').currentTime || OpenRec.cursor) / duration) * w;
   g.strokeStyle = '#ff4d4d'; g.lineWidth = 2 * devicePixelRatio; g.beginPath(); g.moveTo(cursor, 0); g.lineTo(cursor, h); g.stroke();
+}
+
+function renderOpenClips() {
+  const layer = $('open-clip-layer');
+  if (!layer || !State.project) return;
+  const state = ensureOpenBuffer(), duration = State.project.duration;
+  layer.innerHTML = '';
+  state.clips.forEach(clip => {
+    const el = document.createElement('div');
+    el.className = 'open-clip' + (clip.id === OpenRec.selectedClipId ? ' selected' : '');
+    el.style.left = (clip.start / duration * 100) + '%';
+    el.style.width = Math.max(.5, (clip.end - clip.start) / duration * 100) + '%';
+    el.dataset.clipId = clip.id;
+    el.innerHTML = `<i class="open-clip-handle left"></i><span class="open-clip-label"></span><i class="open-clip-handle right"></i>`;
+    el.querySelector('.open-clip-label').textContent = clip.label || 'Audio clip';
+    el.addEventListener('pointerdown', e => beginClipDrag(e, clip, e.target.classList.contains('left') ? 'left' : e.target.classList.contains('right') ? 'right' : 'move'));
+    layer.appendChild(el);
+  });
+}
+
+function beginClipDrag(event, clip, mode) {
+  event.preventDefault(); event.stopPropagation();
+  OpenRec.selectedClipId = clip.id;
+  const layer = $('open-clip-layer'), rect = layer.getBoundingClientRect();
+  const origin = { ...clip }, startX = event.clientX;
+  const onMove = e => {
+    const delta = (e.clientX - startX) / rect.width * State.project.duration;
+    if (mode === 'left') clip.start = Math.max(origin.start, Math.min(clip.end - .03, origin.start + delta));
+    else if (mode === 'right') clip.end = Math.min(origin.end, Math.max(clip.start + .03, origin.end + delta));
+    else {
+      const length = origin.end - origin.start;
+      clip.start = Math.max(0, Math.min(State.project.duration - length, origin.start + delta));
+      clip.end = clip.start + length;
+    }
+    renderOpenClips();
+  };
+  const onUp = () => {
+    window.removeEventListener('pointermove', onMove); window.removeEventListener('pointerup', onUp);
+    const changed = Math.abs(clip.start - origin.start) > .001 || Math.abs(clip.end - origin.end) > .001;
+    if (!changed) { renderOpenClips(); return; }
+    pushOpenHistoryWithOverride(origin, clip.id);
+    applyClipEditToBuffer(clip, origin, mode);
+  };
+  window.addEventListener('pointermove', onMove); window.addEventListener('pointerup', onUp, { once: true });
+  renderOpenClips();
+}
+
+function pushOpenHistoryWithOverride(originalClip, id) {
+  const state = ensureOpenBuffer();
+  const current = state.clips.find(c => c.id === id), changed = current ? { ...current } : null;
+  if (current) Object.assign(current, originalClip);
+  pushOpenHistory();
+  if (current && changed) Object.assign(current, changed);
+}
+
+function applyClipEditToBuffer(clip, origin, mode) {
+  const state = ensureOpenBuffer();
+  if (mode === 'move') {
+    const duration = origin.end - origin.start;
+    const safeAt = findNonOverlappingStartIgnoring(clip.id, clip.start, duration);
+    state.buffer = Recorder.moveTrackRange(state.buffer, origin.start, origin.end, safeAt);
+    clip.start = +safeAt.toFixed(3); clip.end = +(safeAt + duration).toFixed(3);
+  } else if (mode === 'left' && clip.start > origin.start) {
+    state.buffer = Recorder.silenceTrackRange(state.buffer, origin.start, clip.start);
+  } else if (mode === 'right' && clip.end < origin.end) {
+    state.buffer = Recorder.silenceTrackRange(state.buffer, clip.end, origin.end);
+  }
+  state.clips.sort((a, b) => a.start - b.start); state.saved = false;
+  state.edits.push({ type: mode === 'move' ? 'move' : 'trim', at: clip.start, end: clip.end, createdAt: Date.now() });
+  setOpenSelection(clip.start, clip.end); updateOpenRecordingUI();
+}
+
+function findNonOverlappingStartIgnoring(id, requested, duration) {
+  const clips = (State.project.openRecording?.clips || []).filter(c => c.id !== id).sort((a, b) => a.start - b.start);
+  let at = Math.max(0, requested);
+  for (const other of clips) {
+    if (at + duration <= other.start) break;
+    if (at < other.end && at + duration > other.start) at = other.end;
+  }
+  return Math.min(Math.max(0, State.project.duration - duration), at);
 }
 
 /* ═══════════════ SETTINGS ═══════════════ */
@@ -1931,6 +2191,7 @@ async function openProjectBundle(file) {
       aiSuggestions: sm.aiSuggestions || [],
       sourceLineNumbers: sm.sourceLineNumbers || [sm.lineNumber],
       sourceSegmentIds: sm.sourceSegmentIds || [sm.id],
+      mergedSources: sm.mergedSources || null,
       takes: []
     };
 
@@ -1986,6 +2247,8 @@ async function openProjectBundle(file) {
       State.project.openRecording.buffer = await ac.decodeAudioData(await takeBlobs.get('__open_recording__').arrayBuffer());
       State.project.openRecording.hasAudio = true;
       State.project.openRecording.edits = manifest.openRecording.edits || [];
+      State.project.openRecording.clips = manifest.openRecording.clips || [];
+      State.project.openRecording.saved = !!manifest.openRecording.saved;
     } catch (e) { console.warn('Open recording track could not be restored:', e); }
   }
   State.userMode = manifest.userMode || 'single';
